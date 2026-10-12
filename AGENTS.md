@@ -24,17 +24,17 @@ User-facing strings are English.
 - Claude Code: `~/.claude/projects/**/*.jsonl`. Claude records that mirror an OMP session are skipped
 - Cursor (not listed): `~/.cursor/projects/<project>/agent-transcripts/<id>/<id>.jsonl`
 
-The list marks `inWorkspace` from the current workspace.
+The list marks `inWorkspace` when the session directory is the workspace directory or a directory inside it.
 
 ## Activity
 
-A session whose file is still growing is `running`. After the size stays quiet for `QUIET_MS` (15 seconds), a session whose tail is a reply and which the user does not have open becomes `fresh`. The open session updates incrementally and is not marked fresh. The library scans about every 60 seconds and also watches jsonl files with `fs.watch`.
+A session whose file is still growing is `running`. After the size stays quiet for `QUIET_MS` (15 seconds), a session whose tail is a reply and which the user does not have open becomes `fresh`. Growth that contains no conversation record, such as a process-exit line, stays seen. The open session updates incrementally and is not marked fresh. Hidden sessions that are `running` or `fresh` stay in the list. The activity filter is Any, New reply, or Running. The library scans about every 60 seconds and also watches jsonl files with `fs.watch`.
 
 ## Replies and comments
 
 The reply box and "Send to this turn" both call `pasteIntoTerminal`: find the live TTY for that OMP session and paste the text there. Claude and Cursor sessions have no such path.
 
-A file comment stores the selection position from the moment it was made, in the extension `globalState`.
+A file comment belongs to one review of that file. The review closes when its comments are sent, and also when the file is opened again after the text has changed. The next review starts with no comments. Sending pastes only the open review. An earlier review keeps its comments and the file text from that review.
 
 ## Package
 

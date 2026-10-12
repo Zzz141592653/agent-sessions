@@ -6,6 +6,8 @@ const { spawn, execFileSync } = require("child_process");
 const vscode = require("vscode");
 const MarkdownIt = require("markdown-it");
 
+const { normalizeRecord, openRound, noteLiveFile, closeRound, hashText } = require("./comments");
+
 const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
 const MAX_BYTES = 2_000_000;
 
@@ -49,7 +51,8 @@ class FileView {
       this.watcher?.dispose();
       if (view === this) view = undefined;
     });
-    this.record = { comments: [] };
+    this.record = normalizeRecord(null);
+    this.viewing = "";
     this.ready = false;
     this.queue = null;
   }
@@ -58,7 +61,11 @@ class FileView {
     this.file = location.file;
     this.focusLine = location.line || 0;
     this.session = session || null;
-    this.record = await readRecord(this.context, this.file);
+    this.viewing = "";
+    this.record = readRecord(this.context, this.file);
+    const source = fs.readFileSync(this.file, "utf8");
+    openRound(this.record, source);
+    ensureSnapshot(this.context, this.file, this.record, source);
     if (session) {
       this.record.session = {
         key: session.key,
@@ -68,8 +75,8 @@ class FileView {
         cwd: session.cwd,
         filePath: session.filePath,
       };
-      await writeRecord(this.context, this.file, this.record);
     }
+    await writeRecord(this.context, this.file, this.record);
     this.panel.title = path.basename(this.file);
     this.panel.reveal(vscode.ViewColumn.Active);
     this.watch();
@@ -81,7 +88,7 @@ class FileView {
     this.watcher?.dispose();
     const folder = vscode.Uri.file(path.dirname(this.file));
     this.watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, path.basename(this.file)));
-    this.watcher.onDidChange(() => this.post(false));
+    this.watcher.onDidChange(() => this.onFileChanged());
   }
 
   async onMessage(message) {
@@ -96,11 +103,16 @@ class FileView {
     }
     if (!this.file) return;
     if (message.type === "add") {
+      if (this.viewing) return;
       const source = fs.readFileSync(this.file, "utf8");
       const located = locateQuote(source, message.quote, { startLine: message.startLine, endLine: message.endLine });
       const body = String(message.body || "").trim();
       if (!body) return;
-      this.record.comments.push({
+      if (!this.record.current.comments.length) {
+        this.record.current.baseHash = hashText(source);
+        this.record.current.snapshot = "";
+      }
+      this.record.current.comments.push({
         id: crypto.randomUUID(),
         quote: message.quote,
         excerpt: located?.excerpt || message.quote,
@@ -114,23 +126,32 @@ class FileView {
         body,
         stale: false,
       });
+      ensureSnapshot(this.context, this.file, this.record, source);
       await writeRecord(this.context, this.file, this.record);
       await this.post(false);
       return;
     }
     if (message.type === "delete") {
-      this.record.comments = this.record.comments.filter((item) => item.id !== message.id);
+      if (this.viewing) return;
+      this.record.current.comments = this.record.current.comments.filter((item) => item.id !== message.id);
       await writeRecord(this.context, this.file, this.record);
       await this.post(false);
       return;
     }
+    if (message.type === "showVersion") {
+      const id = String(message.id || "");
+      this.viewing = this.record.versions.some((item) => item.id === id) ? id : "";
+      await this.post(false);
+      return;
+    }
     if (message.type === "diff") {
-      if (this.record.snapshot) {
+      const snapshotPath = this.diffSnapshot();
+      if (snapshotPath && fs.existsSync(snapshotPath)) {
         await vscode.commands.executeCommand(
           "vscode.diff",
-          vscode.Uri.file(this.record.snapshot),
+          vscode.Uri.file(snapshotPath),
           vscode.Uri.file(this.file),
-          `${path.basename(this.file)}: before ↔ current`
+          `${path.basename(this.file)}: earlier review ↔ current`
         );
       }
       return;
@@ -138,54 +159,102 @@ class FileView {
     if (message.type === "send") await this.send();
   }
 
+  onFileChanged() {
+    if (!this.file) return;
+    let source = "";
+    try {
+      source = fs.readFileSync(this.file, "utf8");
+    } catch {
+      return;
+    }
+    if (noteLiveFile(this.record, source)) writeRecord(this.context, this.file, this.record);
+    void this.post(false);
+  }
+
+  diffSnapshot() {
+    if (this.viewing) {
+      const version = this.record.versions.find((item) => item.id === this.viewing);
+      return version?.snapshot || "";
+    }
+    const versions = this.record.versions;
+    return versions.length ? versions[versions.length - 1].snapshot : "";
+  }
+
   async send() {
     const session = this.record.session;
-    const open = this.record.comments.filter((item) => !item.stale);
-    if (!session || !open.length) return;
-    const prompt = open
-      .map((item) => `Selection:\n> ${item.excerpt.replace(/\n/g, "\n> ")}\n\nComment: ${item.body}`)
-      .join("\n\n");
+    const comments = this.record.current.comments;
+    if (this.viewing || !session || !comments.length) return;
+    const source = fs.readFileSync(this.file, "utf8");
     const tty = liveTty(session);
     if (!tty) {
       void vscode.window.showWarningMessage("That window is not open. Open it in the terminal before sending comments.");
       return;
     }
-    this.record.snapshot = snapshot(this.context, this.file);
-    await writeRecord(this.context, this.file, this.record);
+    ensureSnapshot(this.context, this.file, this.record, source);
+    const prompt = comments
+      .map((item) => {
+        const excerpt = item.excerpt || item.quote || "";
+        return `Selection:\n> ${excerpt.replace(/\n/g, "\n> ")}\n\nComment: ${item.body}`;
+      })
+      .join("\n\n");
     try {
       await pasteIntoTerminal(tty, prompt);
+      closeRound(this.record, source);
+      this.viewing = "";
       this.notice = "Pasted into the open window. Switch back to see the comments and what follows.";
     } catch (error) {
       void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
     }
+    await writeRecord(this.context, this.file, this.record);
     await this.post(false);
   }
 
   async post(jump) {
     if (!this.file || !this.ready) return;
-    const source = fs.readFileSync(this.file, "utf8");
-    for (const comment of this.record.comments) {
-      comment.stale = !quoteStillThere(source, comment.excerpt || comment.quote, this.file);
+    const live = fs.readFileSync(this.file, "utf8");
+    let source = live;
+    let comments = this.record.current.comments;
+    let versionId = "";
+    let missingText = false;
+    if (this.viewing) {
+      const version = this.record.versions.find((item) => item.id === this.viewing);
+      if (!version) this.viewing = "";
+      else {
+        versionId = version.id;
+        comments = version.comments;
+        if (version.snapshot && fs.existsSync(version.snapshot)) source = fs.readFileSync(version.snapshot, "utf8");
+        else missingText = true;
+      }
     }
     const session = this.record.session;
     const label = session ? `${session.sourceLabel} · ${session.title}` : "No session attached";
     const tty = session ? liveTty(session) : "";
-    const fresh = this.record.comments.some((item) => !item.stale);
     let notice = this.notice;
-    if (!notice) {
+    this.notice = "";
+    if (versionId) notice = "Earlier review. These comments stay with that version.";
+    else if (!notice) {
       if (!session) notice = "Open this file from a session before sending comments back to that turn.";
       else if (!tty) notice = `The ${label} window is not open. Open it before sending comments there.`;
-      else if (this.record.comments.length && !fresh) notice = "These comments no longer match the file, so they cannot be sent yet.";
       else notice = `Comments go to the open ${label} window`;
     }
+    const html = missingText
+      ? `<p class="empty">The file text for this review was not kept.</p>`
+      : (isMarkdown(this.file) ? renderMarkdown(source) : renderText(source));
+    const snapshotPath = this.diffSnapshot();
     await this.panel.webview.postMessage({
       type: "state",
       fileName: path.basename(this.file),
-      html: isMarkdown(this.file) ? renderMarkdown(source) : renderText(source),
-      comments: this.record.comments,
+      html,
+      comments,
+      versions: this.record.versions.map((version) => ({
+        id: version.id,
+        closedAt: version.closedAt,
+        count: version.comments.length,
+      })),
+      versionId,
       sessionLabel: label,
-      canSend: Boolean(tty && fresh),
-      canDiff: Boolean(this.record.snapshot),
+      canSend: Boolean(!versionId && tty && this.record.current.comments.length),
+      canDiff: Boolean(snapshotPath && fs.existsSync(snapshotPath)),
       notice,
       focusLine: jump ? this.focusLine : 0,
     });
@@ -352,12 +421,18 @@ on run argv
 end run
 `;
 
-function snapshot(context, file) {
-  const dir = path.join(context.globalStorageUri.fsPath, "snapshots");
+function ensureSnapshot(context, file, record, source) {
+  const current = record.current;
+  if (!current.comments.length) return false;
+  if (current.baseHash && current.baseHash !== hashText(source)) return false;
+  if (current.snapshot && fs.existsSync(current.snapshot)) return false;
+  const dir = path.join(context.globalStorageUri.fsPath, "snapshots", encodeKey(file));
   fs.mkdirSync(dir, { recursive: true });
-  const dest = path.join(dir, `${encodeKey(file)}.md`);
-  fs.copyFileSync(file, dest);
-  return dest;
+  const dest = path.join(dir, `${crypto.randomUUID()}.txt`);
+  fs.writeFileSync(dest, source);
+  current.snapshot = dest;
+  if (!current.baseHash) current.baseHash = hashText(source);
+  return true;
 }
 
 function recordPath(context, file) {
@@ -366,9 +441,9 @@ function recordPath(context, file) {
 
 function readRecord(context, file) {
   try {
-    return JSON.parse(fs.readFileSync(recordPath(context, file), "utf8"));
+    return normalizeRecord(JSON.parse(fs.readFileSync(recordPath(context, file), "utf8")));
   } catch {
-    return { comments: [] };
+    return normalizeRecord(null);
   }
 }
 
@@ -455,31 +530,6 @@ function locateQuote(source, quote, hint) {
   };
 }
 
-function quoteStillThere(source, quote, file) {
-  const text = String(quote || "");
-  if (!text) return false;
-  if (source.includes(text)) return true;
-  const visible = isMarkdown(file) ? markdownPlain(source) : source;
-  if (visible.includes(text)) return true;
-  const folded = text.replace(/\s+/g, "");
-  return Boolean(folded) && visible.replace(/\s+/g, "").includes(folded);
-}
-
-function markdownPlain(source) {
-  const html = md.render(source);
-  return html
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/t[dh]>/gi, "\t")
-    .replace(/<\/tr>/gi, "\n")
-    .replace(/<\/(p|li|h[1-6]|div|blockquote|pre)>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
-}
-
 function lineRange(source, startLine, endLine) {
   const lines = source.split("\n");
   let start = 0;
@@ -517,6 +567,10 @@ function htmlFor(context, webview) {
   <article id="doc"></article>
   <aside>
     <h2>Comments</h2>
+    <label id="version-row" hidden>
+      <span class="version-label">Review</span>
+      <select id="version"></select>
+    </label>
     <div id="comments"></div>
   </aside>
 </main>
@@ -525,6 +579,7 @@ ${mermaid}
   <button id="menu-comment" type="button">Comment</button>
 </div>
 <div id="popover" hidden>
+  <blockquote id="pending-quote"></blockquote>
   <textarea id="body" rows="3" placeholder="Write a comment on this selection"></textarea>
   <div class="popover-actions">
     <button id="cancel" type="button">Cancel</button>

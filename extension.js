@@ -3,7 +3,7 @@ const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const vscode = require("vscode");
-const { listSessions, createTranscriptReader, readTranscript, snapshotTranscript, buildFileDiff, ompRoots } = require("./sources");
+const { listSessions, createTranscriptReader, readTranscript, snapshotTranscript, buildFileDiff, ompRoots, hasConversationEntries } = require("./sources");
 const { openReviewedFile, liveTty, pasteIntoTerminal, noteInputFocus, selectAllInInput } = require("./review");
 
 const SCAN_MS = 60_000;
@@ -626,7 +626,9 @@ function settleActivity(key) {
     armActivityQuiet(key);
     return;
   }
-  if (key === openKey || phase !== "reply" || session.size <= (seenSizes[key] ?? 0)) {
+  const seen = seenSizes[key] ?? 0;
+  const reply = phase === "reply" && appendedConversation(session, seen);
+  if (key === openKey || !reply || session.size <= seen) {
     seenSizes[key] = session.size;
     activity.delete(key);
     session.activity = "";
@@ -638,7 +640,61 @@ function settleActivity(key) {
   postSessions();
 }
 
+function appendedConversation(session, fromSize) {
+  const entries = readAppendedEntries(session.filePath, fromSize);
+  if (!entries) return true;
+  return hasConversationEntries(session.source, entries);
+}
+
+function readAppendedEntries(filePath, fromSize) {
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    return null;
+  }
+  if (fromSize < 0 || fromSize > stat.size) return null;
+  const delta = stat.size - fromSize;
+  if (delta === 0) return [];
+  if (delta > 1024 * 1024) return null;
+  const fd = fs.openSync(filePath, "r");
+  try {
+    let start = fromSize;
+    if (fromSize > 0) {
+      const prev = Buffer.alloc(1);
+      fs.readSync(fd, prev, 0, 1, fromSize - 1);
+      if (prev[0] !== 10 && prev[0] !== 13) {
+        const skip = Buffer.alloc(Math.min(delta, 64 * 1024));
+        const n = fs.readSync(fd, skip, 0, skip.length, fromSize);
+        const newline = skip.subarray(0, n).indexOf(10);
+        if (newline < 0) return [];
+        start = fromSize + newline + 1;
+      }
+    }
+    const len = stat.size - start;
+    if (len <= 0) return [];
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, start);
+    const entries = [];
+    for (const line of buf.toString("utf8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("{")) continue;
+      try {
+        entries.push(JSON.parse(trimmed));
+      } catch {
+        // A torn last line is not a record.
+      }
+    }
+    return entries;
+  } catch {
+    return null;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function reconcileActivity() {
+  let seenDirty = false;
   if (!hasBaseline) {
     for (const session of sessions) seenSizes[session.key] = session.size;
     hasBaseline = true;
@@ -651,7 +707,11 @@ function reconcileActivity() {
         continue;
       }
       if (session.size <= seen || activity.get(session.key)?.state === "running") continue;
-      if (Date.now() - session.mtime < QUIET_MS) {
+      if (!appendedConversation(session, seen)) {
+        seenSizes[session.key] = session.size;
+        activity.delete(session.key);
+        seenDirty = true;
+      } else if (Date.now() - session.mtime < QUIET_MS) {
         activity.set(session.key, { state: "running", since: session.mtime });
         armActivityQuiet(session.key);
       } else if (session.key === openKey) {
@@ -668,6 +728,7 @@ function reconcileActivity() {
     if (!sessions.some((session) => session.key === key)) activity.delete(key);
   }
   for (const session of sessions) session.activity = activity.get(session.key)?.state || "";
+  if (seenDirty) persistSeen();
 }
 
 function noteUnseen(session) {
@@ -692,7 +753,8 @@ function persistSeen() {
 function updateStatus() {
   if (!statusItem) return;
   const folders = vscode.workspace.workspaceFolders || [];
-  const pool = folders.length ? sessions.filter((session) => session.inWorkspace) : sessions;
+  const pool = (folders.length ? sessions.filter((session) => session.inWorkspace) : sessions)
+    .filter((session) => !session.hidden || session.activity === "fresh" || session.activity === "running");
   const running = pool.filter((session) => session.activity === "running").length;
   const fresh = pool.filter((session) => session.activity === "fresh").length;
   if (!running && !fresh) {
@@ -1011,6 +1073,11 @@ function htmlFor(context, webview) {
       <div class="chips">
         <button class="scope active" data-scope="workspace">This workspace</button>
         <button class="scope" data-scope="all">All workspaces</button>
+      </div>
+      <div class="chips">
+        <button class="chip active" data-activity="all">Any</button>
+        <button class="chip" data-activity="fresh">New reply</button>
+        <button class="chip" data-activity="running">Running</button>
       </div>
     </div>
     <div id="attention" class="attention" hidden></div>

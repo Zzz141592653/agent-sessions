@@ -116,6 +116,17 @@ aside {
   background: var(--vscode-sideBar-background);
 }
 aside h2 { margin: 0 0 10px; font-size: 13px; }
+#version-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+#version-row[hidden] { display: none !important; }
+.version-label { color: var(--vscode-descriptionForeground); font-size: 11px; }
+#version { width: 100%; }
+#pending-quote {
+  margin: 0 0 8px;
+  max-height: 4.8em;
+  overflow: auto;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+}
 .empty { color: var(--vscode-descriptionForeground); }
 .card { border: 1px solid var(--vscode-panel-border); padding: 8px; margin-bottom: 8px; }
 .card blockquote { margin: 0 0 6px; color: var(--vscode-descriptionForeground); font-size: 12px; }

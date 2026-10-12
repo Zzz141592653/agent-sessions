@@ -6,11 +6,15 @@ const diffEl = document.getElementById("diff");
 const noticeEl = document.getElementById("notice");
 const docEl = document.getElementById("doc");
 const commentsEl = document.getElementById("comments");
+const versionRow = document.getElementById("version-row");
+const versionEl = document.getElementById("version");
 const popover = document.getElementById("popover");
+const pendingQuote = document.getElementById("pending-quote");
 const menu = document.getElementById("menu");
 const bodyEl = document.getElementById("body");
 
 let pending = null;
+let reviewVersionId = "";
 
 bindInputSelectAll();
 
@@ -27,12 +31,28 @@ window.addEventListener("message", (event) => {
   noticeEl.textContent = state.notice;
   sendEl.disabled = !state.canSend;
   diffEl.disabled = !state.canDiff;
-  hideMenu();
-  hidePopover();
+  reviewVersionId = state.versionId || "";
+  const keepDraft = !popover.hidden && pending;
+  const draft = keepDraft ? bodyEl.value : "";
+  const kept = keepDraft ? pending : null;
+  if (!keepDraft) {
+    hideMenu();
+    hidePopover();
+  }
   docEl.innerHTML = state.html;
   const placed = highlight(docEl, state.comments);
   renderDiagrams(docEl);
   renderComments(state.comments, placed);
+  renderVersions(state);
+  if (kept) {
+    pending = kept;
+    pending.range = null;
+    pendingQuote.textContent = pending.quote || "";
+    popover.hidden = false;
+    place(popover, pending.rect);
+    bodyEl.value = draft;
+    applyPendingMark();
+  }
   if (state.focusLine > 0) {
     const block = docEl.querySelector(`[data-start="${state.focusLine - 1}"]`);
     if (block) block.scrollIntoView({ block: "center" });
@@ -41,6 +61,7 @@ window.addEventListener("message", (event) => {
 
 sendEl.addEventListener("click", () => vscode.postMessage({ type: "send" }));
 diffEl.addEventListener("click", () => vscode.postMessage({ type: "diff" }));
+versionEl.addEventListener("change", () => vscode.postMessage({ type: "showVersion", id: versionEl.value }));
 document.getElementById("cancel").addEventListener("click", hidePopover);
 document.getElementById("save").addEventListener("click", save);
 document.getElementById("menu-comment").addEventListener("click", () => {
@@ -66,19 +87,21 @@ document.addEventListener("keydown", (event) => {
   hidePopover();
 });
 document.addEventListener("mousedown", (event) => {
-  if (!menu.hidden && !menu.contains(event.target)) hideMenu();
+  if (!menu.hidden && !menu.contains(event.target)) dismissMenu();
   if (!popover.hidden && !popover.contains(event.target)) hidePopover();
 });
 docEl.addEventListener("scroll", () => {
-  if (!menu.hidden) hideMenu();
+  if (!menu.hidden) dismissMenu();
 });
 
 docEl.addEventListener("contextmenu", (event) => {
+  if (reviewVersionId) return;
   const captured = captureSelection();
   if (!captured) return;
   event.preventDefault();
   hidePopover(true);
   pending = captured;
+  applyPendingMark();
   place(menu, captured.rect);
 });
 
@@ -118,7 +141,7 @@ function captureSelection() {
   if (!selection || selection.isCollapsed || !selection.rangeCount) return null;
   const text = selection.toString().trim();
   if (text.length < 2) return null;
-  const range = selection.getRangeAt(0);
+  const range = selection.getRangeAt(0).cloneRange();
   if (!docEl.contains(range.commonAncestorContainer)) return null;
   const startPoint = textPoint(range.startContainer, range.startOffset);
   const endPoint = textPoint(range.endContainer, range.endOffset);
@@ -140,6 +163,7 @@ function captureSelection() {
     from,
     to,
     rect: range.getBoundingClientRect(),
+    range,
   };
 }
 
@@ -156,8 +180,10 @@ function textPoint(container, offset) {
 }
 
 function openPopover(rect) {
+  pendingQuote.textContent = pending?.quote || "";
   bodyEl.value = "";
   place(popover, rect);
+  applyPendingMark();
   bodyEl.focus();
 }
 
@@ -175,11 +201,16 @@ function hideMenu() {
   menu.hidden = true;
 }
 
+function dismissMenu() {
+  hideMenu();
+  if (popover.hidden) hidePopover();
+}
+
 function save() {
   if (!pending) return;
   const body = bodyEl.value.trim();
   if (!body) return;
-  const { rect, ...comment } = pending;
+  const { rect, range, ...comment } = pending;
   vscode.postMessage({ type: "add", ...comment, body });
   pending = null;
   hidePopover();
@@ -187,14 +218,71 @@ function save() {
 
 function hidePopover(keepPending) {
   popover.hidden = true;
+  if (keepPending) return;
+  pending = null;
+  pendingQuote.textContent = "";
   clearSelectionMark();
-  if (!keepPending && menu.hidden) pending = null;
+}
+
+function applyPendingMark() {
+  if (!pending) return;
+  if (pending.range && pending.range.startContainer && pending.range.startContainer.isConnected) {
+    markSelection(pending.range);
+    return;
+  }
+  const blocks = blocksFor(docEl, pending);
+  if (pending.anchor && sliceText(blocks, pending.from, pending.to) !== pending.anchor) return;
+  markRanges(rangesForOffsets(blocks, pending.from, pending.to));
 }
 
 function markSelection(range) {
+  markRanges(range ? [range] : []);
+}
+
+function markRanges(ranges) {
   clearSelectionMark();
-  if (!window.CSS || !CSS.highlights || typeof Highlight !== "function") return;
-  CSS.highlights.set("pending-comment", new Highlight(range));
+  if (!ranges.length || !window.CSS || !CSS.highlights || typeof Highlight !== "function") return;
+  CSS.highlights.set("pending-comment", new Highlight(...ranges));
+}
+
+function rangesForOffsets(blocks, from, to) {
+  const ranges = [];
+  if (!Number.isInteger(from) || !Number.isInteger(to) || to <= from) return ranges;
+  let count = 0;
+  eachAnchorText(blocks, (node) => {
+    const next = count + node.nodeValue.length;
+    if (next > from && count < to) {
+      const range = document.createRange();
+      range.setStart(node, Math.max(0, from - count));
+      range.setEnd(node, Math.min(node.nodeValue.length, to - count));
+      if (range.startOffset < range.endOffset) ranges.push(range);
+    }
+    count = next;
+    return count >= to ? false : undefined;
+  });
+  return ranges;
+}
+
+function renderVersions(state) {
+  const versions = state.versions || [];
+  versionRow.hidden = versions.length === 0;
+  versionEl.replaceChildren();
+  const current = document.createElement("option");
+  current.value = "";
+  current.textContent = "This review";
+  versionEl.append(current);
+  for (const version of [...versions].reverse()) {
+    const option = document.createElement("option");
+    option.value = version.id;
+    const when = version.closedAt ? new Date(version.closedAt) : null;
+    const stamp = when && !Number.isNaN(when.getTime())
+      ? when.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+      : "Earlier";
+    const count = version.count === 1 ? "1 comment" : `${version.count} comments`;
+    option.textContent = `${stamp} · ${count}`;
+    versionEl.append(option);
+  }
+  versionEl.value = state.versionId || "";
 }
 
 function clearSelectionMark() {
@@ -221,7 +309,8 @@ function renderComments(comments, placed) {
     del.type = "button";
     del.textContent = "Delete";
     del.addEventListener("click", () => vscode.postMessage({ type: "delete", id: comment.id }));
-    card.append(quote, body, del);
+    card.append(quote, body);
+    if (!reviewVersionId) card.append(del);
     if (!comment.stale && !placed.has(comment.id)) {
       const note = document.createElement("p");
       note.className = "empty";

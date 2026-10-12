@@ -1,3 +1,14 @@
+# 1.4.0
+
+Since 1.3.0.
+
+- This workspace no longer includes sessions from a parent directory.
+- Comments belong to one review of a file. A new review starts empty, and sending uses only that review.
+- The passage stays highlighted while its comment is being written.
+- A process-exit record is no longer a new reply.
+- Hidden sessions that are running or have a new reply stay in the list.
+- The list can be filtered to new replies or running sessions.
+
 # 1.3.0
 
 Since 1.2.5.

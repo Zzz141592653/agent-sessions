@@ -6,6 +6,7 @@ const state = {
   sessions: [],
   source: "all",
   scope: "workspace",
+  activity: "all",
   query: "",
   find: "",
   hit: 0,
@@ -81,6 +82,10 @@ for (const button of document.querySelectorAll("[data-scope]")) {
     setActive("[data-scope]", button);
     renderList();
   });
+}
+
+for (const button of document.querySelectorAll("[data-activity]")) {
+  button.addEventListener("click", () => setActivity(button.dataset.activity));
 }
 
 window.addEventListener("message", (event) => {
@@ -273,17 +278,15 @@ function renderList() {
     if (!query) return true;
     return `${session.title} ${session.preview} ${session.project}`.toLowerCase().includes(query);
   });
-  const visible = matched.filter((session) => !session.hidden);
-  const hidden = matched.filter((session) => session.hidden);
+  const shown = matched.filter((session) => !session.hidden || session.activity === "fresh" || session.activity === "running");
+  const hidden = matched.filter((session) => session.hidden && session.activity !== "fresh" && session.activity !== "running");
+  const visible = shown.filter((session) => state.activity === "all" || session.activity === state.activity);
   visible.sort((a, b) => activityRank(a) - activityRank(b) || b.mtime - a.mtime);
   hidden.sort((a, b) => b.mtime - a.mtime);
-  renderAttention(visible);
+  renderAttention(shown);
   listEl.replaceChildren();
-  if (!visible.length && !hidden.length) {
-    listEl.append(el("div", "empty", "No sessions in this scope."));
-    return;
-  }
-  appendSessionGroups(visible);
+  if (!visible.length) listEl.append(el("div", "empty", emptyLabel()));
+  else appendSessionGroups(visible);
   if (!hidden.length) return;
   const toggle = el("button", "hidden-toggle", state.showHidden ? `Hide ${hidden.length} hidden` : `${hidden.length} hidden`);
   toggle.type = "button";
@@ -364,9 +367,22 @@ function activityRank(session) {
   return 2;
 }
 
-function renderAttention(visible) {
-  const running = visible.filter((session) => session.activity === "running").length;
-  const fresh = visible.filter((session) => session.activity === "fresh").length;
+function setActivity(activity) {
+  state.activity = activity;
+  const button = document.querySelector(`[data-activity="${activity}"]`);
+  if (button) setActive("[data-activity]", button);
+  renderList();
+}
+
+function emptyLabel() {
+  if (state.activity === "fresh") return "No new replies.";
+  if (state.activity === "running") return "Nothing running.";
+  return "No sessions in this scope.";
+}
+
+function renderAttention(shown) {
+  const running = shown.filter((session) => session.activity === "running").length;
+  const fresh = shown.filter((session) => session.activity === "fresh").length;
   if (!running && !fresh) {
     attentionEl.hidden = true;
     attentionEl.replaceChildren();
@@ -374,8 +390,16 @@ function renderAttention(visible) {
   }
   attentionEl.hidden = false;
   attentionEl.replaceChildren();
-  if (running) attentionEl.append(el("span", "badge running", `${running} running`));
-  if (fresh) attentionEl.append(el("span", "badge fresh", `${fresh} new`));
+  if (running) attentionEl.append(activityBadge("running", `${running} running`));
+  if (fresh) attentionEl.append(activityBadge("fresh", `${fresh} new`));
+}
+
+function activityBadge(activity, label) {
+  const button = el("button", `badge ${activity}${state.activity === activity ? " active" : ""}`, label);
+  button.type = "button";
+  button.title = activity === "fresh" ? "Show sessions with a new reply" : "Show sessions that are still running";
+  button.addEventListener("click", () => setActivity(state.activity === activity ? "all" : activity));
+  return button;
 }
 
 function applyMeta() {

@@ -605,7 +605,7 @@ function belongsToWorkspace(cwd, folders) {
   const sessionPath = path.resolve(cwd);
   return folders.some((folder) => {
     const workspacePath = path.resolve(folder);
-    return sessionPath === workspacePath || sessionPath.startsWith(workspacePath + path.sep) || workspacePath.startsWith(sessionPath + path.sep);
+    return sessionPath === workspacePath || sessionPath.startsWith(workspacePath + path.sep);
   });
 }
 
@@ -753,6 +753,19 @@ function isDir(dir) {
   }
 }
 
+function hasConversationEntries(source, entries) {
+  return entries.some((entry) => conversationEntry(source, entry));
+}
+
+function conversationEntry(source, entry) {
+  if (source === "omp") {
+    if (entry.type === "custom" && entry.customType === "tool_execution_start") return true;
+    return entry.type === "message" && Boolean(entry.message);
+  }
+  if (source === "claude") return entry.type === "assistant" || entry.type === "user";
+  return false;
+}
+
 module.exports = {
   SOURCES,
   listSessions,
@@ -762,6 +775,8 @@ module.exports = {
   snapshotTranscript,
   buildFileDiff,
   ompRoots,
+  hasConversationEntries,
+  belongsToWorkspace,
 };
 
 if (require.main === module) {

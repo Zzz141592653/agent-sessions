@@ -147,6 +147,8 @@ input[type="search"] {
   color: var(--claude);
   background: color-mix(in srgb, var(--claude) 16%, transparent);
 }
+button.badge { border: 0; }
+.badge.active { outline: 1px solid currentColor; }
 .attention {
   display: flex;
   flex-wrap: wrap;
