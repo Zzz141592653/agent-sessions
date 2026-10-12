@@ -43,7 +43,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/instacart/agent-sessions.git"
+    "url": "https://github.com/Zzz141592653/agent-sessions.git"
   },
   "scripts": {
     "package": "vsce package"
