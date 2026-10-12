@@ -139,9 +139,9 @@ window.addEventListener("message", (event) => {
     state.transcript = null;
     state.diffData = null;
     state.canReply = false;
-    titleEl.textContent = "选择一条会话";
+    titleEl.textContent = "Select a session";
     metaEl.textContent = "";
-    threadEl.replaceChildren(el("div", "empty", "从左侧选一条会话。"));
+    threadEl.replaceChildren(el("div", "empty", "Select a session from the list."));
     renderDiff();
     renderList();
     updateReply();
@@ -253,7 +253,7 @@ function sendReply() {
   if (!text || !state.canReply || state.replying) return;
   state.replying = true;
   updateReply();
-  replyNotice.textContent = "正在发到 OMP 窗口…";
+  replyNotice.textContent = "Sending to the open OMP window…";
   vscode.postMessage({ type: "reply", text });
 }
 
@@ -280,12 +280,12 @@ function renderList() {
   renderAttention(visible);
   listEl.replaceChildren();
   if (!visible.length && !hidden.length) {
-    listEl.append(el("div", "empty", "这个范围里还没有会话。"));
+    listEl.append(el("div", "empty", "No sessions in this scope."));
     return;
   }
   appendSessionGroups(visible);
   if (!hidden.length) return;
-  const toggle = el("button", "hidden-toggle", state.showHidden ? `收起已隐藏的 ${hidden.length} 条` : `已隐藏 ${hidden.length} 条`);
+  const toggle = el("button", "hidden-toggle", state.showHidden ? `Hide ${hidden.length} hidden` : `${hidden.length} hidden`);
   toggle.type = "button";
   toggle.addEventListener("click", () => {
     state.showHidden = !state.showHidden;
@@ -319,15 +319,15 @@ function sessionRow(session) {
   main.type = "button";
   const titleRow = el("span", "title-row");
   titleRow.append(el("span", "title", session.title));
-  if (session.activity === "running") titleRow.append(el("span", "badge running", "处理中"));
-  else if (session.activity === "fresh") titleRow.append(el("span", "badge fresh", "新回应"));
+  if (session.activity === "running") titleRow.append(el("span", "badge running", "Running"));
+  else if (session.activity === "fresh") titleRow.append(el("span", "badge fresh", "New reply"));
   main.append(titleRow);
   main.append(el("span", "meta", `${session.project ? `${session.project} · ` : ""}${when(session.mtime)}`));
   main.addEventListener("click", () => openSessionRow(session));
   const actions = el("div", "session-actions");
-  if (session.hidden) actions.append(sessionAction("恢复", () => vscode.postMessage({ type: "unhide", key: session.key })));
-  else actions.append(sessionAction("隐藏", () => vscode.postMessage({ type: "hide", key: session.key })));
-  actions.append(sessionAction("删除", () => vscode.postMessage({ type: "deleteSession", key: session.key })));
+  if (session.hidden) actions.append(sessionAction("Restore", () => vscode.postMessage({ type: "unhide", key: session.key })));
+  else actions.append(sessionAction("Hide", () => vscode.postMessage({ type: "hide", key: session.key })));
+  actions.append(sessionAction("Delete", () => vscode.postMessage({ type: "deleteSession", key: session.key })));
   row.append(main, actions);
   return row;
 }
@@ -351,8 +351,8 @@ function openSessionRow(session) {
   }
   state.selected = session.key;
   titleEl.textContent = session.title;
-  metaEl.textContent = "正在读取…";
-  threadEl.replaceChildren(el("div", "empty", "正在读取…"));
+  metaEl.textContent = "Loading…";
+  threadEl.replaceChildren(el("div", "empty", "Loading…"));
   updateJump();
   renderList();
   vscode.postMessage({ type: "open", key: session.key });
@@ -374,16 +374,16 @@ function renderAttention(visible) {
   }
   attentionEl.hidden = false;
   attentionEl.replaceChildren();
-  if (running) attentionEl.append(el("span", "badge running", `${running} 个处理中`));
-  if (fresh) attentionEl.append(el("span", "badge fresh", `${fresh} 条新回应`));
+  if (running) attentionEl.append(el("span", "badge running", `${running} running`));
+  if (fresh) attentionEl.append(el("span", "badge fresh", `${fresh} new`));
 }
 
 function applyMeta() {
   const transcript = state.transcript;
   const session = state.sessions.find((item) => item.key === state.selected);
-  titleEl.textContent = transcript?.title || session?.title || "会话";
+  titleEl.textContent = transcript?.title || session?.title || "Session";
   metaEl.textContent = session
-    ? `${session.sourceLabel}${session.project ? ` · ${session.project}` : ""}${state.following ? " · 实时" : ""}`
+    ? `${session.sourceLabel}${session.project ? ` · ${session.project}` : ""}${state.following ? " · live" : ""}`
     : "";
 }
 
@@ -403,10 +403,10 @@ function renderThread(mode) {
   applyMeta();
   const column = el("div", "column");
   threadEl.replaceChildren(column);
-  if (transcript.omitted > 0) column.append(el("div", "note", `更早的 ${transcript.omitted} 条已略过`));
+  if (transcript.omitted > 0) column.append(el("div", "note", `${transcript.omitted} earlier messages omitted`));
   if (!transcript.turns.length) {
-    column.append(el("div", "empty", "这条会话还没有可显示的消息。"));
-    findCountEl.textContent = state.find.trim() ? "无匹配" : "";
+    column.append(el("div", "empty", "This session has no messages to show."));
+    findCountEl.textContent = state.find.trim() ? "No matches" : "";
     updateJump();
     return;
   }
@@ -451,7 +451,7 @@ function renderTurn(turn, previous) {
   if (turn.thinking) {
     const details = document.createElement("details");
     details.className = "thinking";
-    details.append(el("summary", "", "思考"));
+    details.append(el("summary", "", "Thinking"));
     const thought = el("div", "md");
     renderMarkdown(thought, turn.thinking);
     details.append(thought);
@@ -502,7 +502,7 @@ function patchThread(message) {
   const previousScroll = threadEl.scrollTop;
   const note = column.querySelector(":scope > .note");
   if (state.transcript.omitted > 0) {
-    const text = `更早的 ${state.transcript.omitted} 条已略过`;
+    const text = `${state.transcript.omitted} earlier messages omitted`;
     if (note) note.textContent = text;
     else column.prepend(el("div", "note", text));
   } else if (note) {
@@ -527,7 +527,7 @@ function patchThread(message) {
   for (const turn of message.appended || []) column.append(renderTurn(turn));
   const empty = column.querySelector(":scope > .empty");
   if (state.transcript.turns.length) empty?.remove();
-  else if (!empty) column.append(el("div", "empty", "这条会话还没有可显示的消息。"));
+  else if (!empty) column.append(el("div", "empty", "This session has no messages to show."));
   if (nearBottom) {
     const pinToEnd = () => {
       threadEl.scrollTop = threadEl.scrollHeight;
@@ -576,7 +576,7 @@ function highlightHits(root, query) {
       parent = parent.parentElement;
     }
   });
-  if (!marks.length) findCountEl.textContent = "无匹配";
+  if (!marks.length) findCountEl.textContent = "No matches";
   return marks;
 }
 
@@ -613,7 +613,7 @@ function renderFiles() {
       item.append(el("span", "add", `+${additions}`));
       item.append(el("span", "del", `-${deletions}`));
     }
-    const button = el("button", "diff-btn", "对比");
+    const button = el("button", "diff-btn", "Diff");
     button.type = "button";
     button.addEventListener("click", () => vscode.postMessage({ type: "fileDiff", path: raw }));
     item.append(button);
@@ -624,7 +624,7 @@ function renderFiles() {
     return;
   }
   filesEl.hidden = false;
-  filesEl.append(el("h3", "", "这次改过的文件"));
+  filesEl.append(el("h3", "", "Files changed this turn"));
   filesEl.append(list);
 }
 
@@ -641,8 +641,8 @@ function renderDiff() {
   head.append(el("span", "diff-title", displayPath(data.path, href || data.path)));
   head.append(el("span", "add", `+${data.additions || 0}`));
   head.append(el("span", "del", `-${data.deletions || 0}`));
-  const split = el("button", state.diffMode === "split" ? "mode active" : "mode", "分边");
-  const inline = el("button", state.diffMode === "inline" ? "mode active" : "mode", "行内");
+  const split = el("button", state.diffMode === "split" ? "mode active" : "mode", "Split");
+  const inline = el("button", state.diffMode === "inline" ? "mode active" : "mode", "Inline");
   split.type = "button";
   inline.type = "button";
   split.addEventListener("click", () => {
@@ -653,7 +653,7 @@ function renderDiff() {
     state.diffMode = "inline";
     renderDiff();
   });
-  const close = el("button", "mode", "关闭");
+  const close = el("button", "mode", "Close");
   close.type = "button";
   close.addEventListener("click", () => {
     state.diffData = null;
@@ -662,7 +662,7 @@ function renderDiff() {
   head.append(split, inline, close);
   diffView.append(head);
   if (!data.hunks || !data.hunks.length) {
-    diffView.append(el("p", "diff-empty", "这次修改没有留下可对照的原文。"));
+    diffView.append(el("p", "diff-empty", "This change has no original text to compare."));
     return;
   }
   for (const hunk of data.hunks) diffView.append(renderHunk(hunk));
@@ -670,10 +670,10 @@ function renderDiff() {
 
 function renderHunk(hunk) {
   const block = el("section", "hunk");
-  block.append(el("h4", "", hunk.title || "修改"));
+  block.append(el("h4", "", hunk.title || "Change"));
   if (state.diffMode === "inline") block.append(renderInlineDiff(hunk.lines || []));
   else block.append(renderSplitDiff(hunk.lines || []));
-  if (hunk.truncated) block.append(el("p", "diff-empty", "后面还有更多行，这里只展开前面一部分。"));
+  if (hunk.truncated) block.append(el("p", "diff-empty", "More lines follow. Only the first part is shown."));
   return block;
 }
 
@@ -1089,9 +1089,9 @@ function when(mtime) {
   const minute = 60 * 1000;
   const hour = 60 * minute;
   const day = 24 * hour;
-  if (delta < minute) return "刚刚";
-  if (delta < hour) return `${Math.floor(delta / minute)} 分钟前`;
-  if (delta < day) return `${Math.floor(delta / hour)} 小时前`;
-  if (delta < 7 * day) return `${Math.floor(delta / day)} 天前`;
+  if (delta < minute) return "just now";
+  if (delta < hour) return `${Math.floor(delta / minute)}m ago`;
+  if (delta < day) return `${Math.floor(delta / hour)}h ago`;
+  if (delta < 7 * day) return `${Math.floor(delta / day)}d ago`;
   return new Date(mtime).toLocaleDateString();
 }

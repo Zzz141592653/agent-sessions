@@ -38,7 +38,7 @@ function openReviewedFile(context, location, session) {
 class FileView {
   constructor(context) {
     this.context = context;
-    this.panel = vscode.window.createWebviewPanel("agentSessionsFile", "文件", vscode.ViewColumn.Active, {
+    this.panel = vscode.window.createWebviewPanel("agentSessionsFile", "File", vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: true,
     });
@@ -130,7 +130,7 @@ class FileView {
           "vscode.diff",
           vscode.Uri.file(this.record.snapshot),
           vscode.Uri.file(this.file),
-          `${path.basename(this.file)}：改前 ↔ 当前`
+          `${path.basename(this.file)}: before ↔ current`
         );
       }
       return;
@@ -143,18 +143,18 @@ class FileView {
     const open = this.record.comments.filter((item) => !item.stale);
     if (!session || !open.length) return;
     const prompt = open
-      .map((item) => `这段：\n> ${item.excerpt.replace(/\n/g, "\n> ")}\n\n意见：${item.body}`)
+      .map((item) => `Selection:\n> ${item.excerpt.replace(/\n/g, "\n> ")}\n\nComment: ${item.body}`)
       .join("\n\n");
     const tty = liveTty(session);
     if (!tty) {
-      void vscode.window.showWarningMessage("这一轮的窗口没开着。先在终端里打开它，意见才会出现在那个窗口里。");
+      void vscode.window.showWarningMessage("That window is not open. Open it in the terminal before sending comments.");
       return;
     }
     this.record.snapshot = snapshot(this.context, this.file);
     await writeRecord(this.context, this.file, this.record);
     try {
       await pasteIntoTerminal(tty, prompt);
-      this.notice = "已贴进当前窗口。回到那个窗口就能看到意见和后续输出。";
+      this.notice = "Pasted into the open window. Switch back to see the comments and what follows.";
     } catch (error) {
       void vscode.window.showErrorMessage(error instanceof Error ? error.message : String(error));
     }
@@ -168,15 +168,15 @@ class FileView {
       comment.stale = !quoteStillThere(source, comment.excerpt || comment.quote, this.file);
     }
     const session = this.record.session;
-    const label = session ? `${session.sourceLabel} · ${session.title}` : "没有绑定会话";
+    const label = session ? `${session.sourceLabel} · ${session.title}` : "No session attached";
     const tty = session ? liveTty(session) : "";
     const fresh = this.record.comments.some((item) => !item.stale);
     let notice = this.notice;
     if (!notice) {
-      if (!session) notice = "从会话里点开文件后，才能发回那一轮。";
-      else if (!tty) notice = `${label} 的窗口没开着。先打开它，发送才会出现在那个窗口里。`;
-      else if (this.record.comments.length && !fresh) notice = "这些意见对不上当前正文，所以先不能发。";
-      else notice = `意见发回当前打开的 ${label}`;
+      if (!session) notice = "Open this file from a session before sending comments back to that turn.";
+      else if (!tty) notice = `The ${label} window is not open. Open it before sending comments there.`;
+      else if (this.record.comments.length && !fresh) notice = "These comments no longer match the file, so they cannot be sent yet.";
+      else notice = `Comments go to the open ${label} window`;
     }
     await this.panel.webview.postMessage({
       type: "state",
@@ -231,7 +231,7 @@ function pasteIntoTerminal(tty, prompt) {
     let stderr = "";
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      reject(new Error(`没能贴进终端。请允许 Cursor 控制 ${appName}。`));
+      reject(new Error(`Could not paste into the terminal. Allow Cursor to control ${appName}.`));
     }, 8000);
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
@@ -240,7 +240,7 @@ function pasteIntoTerminal(tty, prompt) {
       clearTimeout(timer);
       fs.rmSync(promptPath, { force: true });
       if (code === 0) resolve();
-      else reject(new Error(stderr.trim() || "贴进终端失败"));
+      else reject(new Error(stderr.trim() || "Failed to paste into the terminal"));
     });
   });
 }
@@ -293,7 +293,7 @@ on run argv
       end repeat
       if found then exit repeat
     end repeat
-    if found is false then error "找不到这个会话所在的 iTerm 标签"
+    if found is false then error "Could not find the iTerm tab for this session"
     activate
   end tell
   set oldClip to the clipboard
@@ -332,7 +332,7 @@ on run argv
       end repeat
       if found then exit repeat
     end repeat
-    if found is false then error "找不到这个会话所在的终端标签"
+    if found is false then error "Could not find the Terminal tab for this session"
     activate
   end tell
   set oldClip to the clipboard
@@ -499,7 +499,7 @@ function htmlFor(context, webview) {
     : "";
   const mermaid = mermaidSrc ? `<script nonce="${nonce}" src="${mermaidSrc}"></script>` : "";
   return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource};" />
@@ -509,30 +509,30 @@ function htmlFor(context, webview) {
 <header>
   <div id="file"></div>
   <div id="session"></div>
-  <button id="send" type="button">发给这轮</button>
-  <button id="diff" type="button">查看修改</button>
+  <button id="send" type="button">Send to this turn</button>
+  <button id="diff" type="button">View changes</button>
 </header>
 <p id="notice"></p>
 <main>
   <article id="doc"></article>
   <aside>
-    <h2>意见</h2>
+    <h2>Comments</h2>
     <div id="comments"></div>
   </aside>
 </main>
 ${mermaid}
 <div id="menu" hidden>
-  <button id="menu-comment" type="button">评论</button>
+  <button id="menu-comment" type="button">Comment</button>
 </div>
 <div id="popover" hidden>
-  <textarea id="body" rows="3" placeholder="写下对这段的意见"></textarea>
+  <textarea id="body" rows="3" placeholder="Write a comment on this selection"></textarea>
   <div class="popover-actions">
-    <button id="cancel" type="button">取消</button>
-    <button id="save" type="button">添加</button>
+    <button id="cancel" type="button">Cancel</button>
+    <button id="save" type="button">Add</button>
   </div>
 </div>
 <div id="diagram" hidden>
-  <button id="diagram-close" type="button">关闭</button>
+  <button id="diagram-close" type="button">Close</button>
   <div id="diagram-stage"></div>
 </div>
 <script nonce="${nonce}">${script}</script>

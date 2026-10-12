@@ -34,7 +34,7 @@ function activate(context) {
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusItem = status;
   status.text = "$(comment-discussion) Sessions";
-  status.tooltip = "按来源查看 OMP 和 Claude Code 会话";
+  status.tooltip = "Browse OMP and Claude Code sessions by source";
   status.command = "agentSessions.open";
   status.show();
 
@@ -216,22 +216,22 @@ async function deleteSession(key) {
   const session = sessions.find((item) => item.key === key);
   if (!session) return;
   if (sessionIsLive(session)) {
-    void vscode.window.showWarningMessage("这一轮的窗口还开着。先关掉它，再删除原来的会话。");
+    void vscode.window.showWarningMessage("This window is still open. Close it before deleting the session.");
     return;
   }
   const choice = await vscode.window.showWarningMessage(
-    `把「${session.title}」从 ${session.sourceLabel} 移到废纸篓？列表里也不会再出现。`,
+    `Move "${session.title}" from ${session.sourceLabel} to the Trash? It will also leave the list.`,
     { modal: true },
-    "移到废纸篓"
+    "Move to Trash"
   );
-  if (choice !== "移到废纸篓") return;
+  if (choice !== "Move to Trash") return;
   if (sessionIsLive(session)) {
-    void vscode.window.showWarningMessage("这一轮的窗口还开着。先关掉它，再删除原来的会话。");
+    void vscode.window.showWarningMessage("This window is still open. Close it before deleting the session.");
     return;
   }
   const targets = trashTargets(session);
   if (!targets.length) {
-    void vscode.window.showWarningMessage("没有找到可以删除的会话记录。");
+    void vscode.window.showWarningMessage("No session record found to delete.");
     return;
   }
   for (const target of targets) {
@@ -372,12 +372,12 @@ function postReplyState() {
 
 function replyState(session) {
   if (!session || session.source !== "omp") {
-    return { canReply: false, hint: "先选一条 OMP 会话。这里的回复会发到那个正在开着的窗口。" };
+    return { canReply: false, hint: "Select an OMP session. Replies are sent to its open window." };
   }
   if (!liveTty(session)) {
-    return { canReply: false, hint: "这一轮的窗口没开着。先在终端里打开它，回复才会出现在那里。" };
+    return { canReply: false, hint: "That window is not open. Open it in the terminal before replying." };
   }
-  return { canReply: true, hint: "在这里回复，会发到当前打开的 OMP 窗口。回车发送。" };
+  return { canReply: true, hint: "Reply here to send it to the open OMP window. Press Enter to send." };
 }
 
 async function replyToSession(text) {
@@ -391,7 +391,7 @@ async function replyToSession(text) {
   }
   try {
     await pasteIntoTerminal(liveTty(session), body);
-    panel.webview.postMessage({ type: "replyResult", ok: true, notice: "已发到当前 OMP 窗口。" });
+    panel.webview.postMessage({ type: "replyResult", ok: true, notice: "Sent to the open OMP window." });
   } catch (error) {
     panel.webview.postMessage({
       type: "replyResult",
@@ -700,8 +700,8 @@ function updateStatus() {
     return;
   }
   const bits = [];
-  if (running) bits.push(`${running} 处理中`);
-  if (fresh) bits.push(`${fresh} 新回应`);
+  if (running) bits.push(`${running} running`);
+  if (fresh) bits.push(`${fresh} new`);
   statusItem.text = `$(comment-discussion) ${bits.join(" · ")}`;
 }
 
@@ -934,7 +934,7 @@ async function openLink(raw) {
   try {
     stat = fs.statSync(location.file);
   } catch {
-    vscode.window.showWarningMessage(`找不到文件：${location.file}`);
+    vscode.window.showWarningMessage(`File not found: ${location.file}`);
     return;
   }
   const uri = vscode.Uri.file(location.file);
@@ -987,7 +987,7 @@ function htmlFor(context, webview) {
   const script = fs.readFileSync(path.join(context.extensionPath, "media", "panel.js"), "utf8");
   const nonce = String(Date.now());
   return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
@@ -1000,17 +1000,17 @@ function htmlFor(context, webview) {
     </div>
     <div class="controls">
       <div class="search-row">
-        <input id="search" type="search" placeholder="搜索标题" />
-        <button id="refresh" type="button" title="马上重新扫描。平时每分钟扫一次">刷新</button>
+        <input id="search" type="search" placeholder="Search titles" />
+        <button id="refresh" type="button" title="Scan now. The library also scans about once a minute">Refresh</button>
       </div>
       <div class="chips">
-        <button class="chip active" data-source="all">全部</button>
+        <button class="chip active" data-source="all">All</button>
         <button class="chip" data-source="omp">OMP</button>
         <button class="chip" data-source="claude">Claude Code</button>
       </div>
       <div class="chips">
-        <button class="scope active" data-scope="workspace">当前仓库</button>
-        <button class="scope" data-scope="all">全部仓库</button>
+        <button class="scope active" data-scope="workspace">This workspace</button>
+        <button class="scope" data-scope="all">All workspaces</button>
       </div>
     </div>
     <div id="attention" class="attention" hidden></div>
@@ -1018,28 +1018,28 @@ function htmlFor(context, webview) {
   </aside>
   <main class="main">
     <header class="thread-head">
-      <h2 id="title">选择一条会话</h2>
+      <h2 id="title">Select a session</h2>
       <div id="meta" class="meta"></div>
       <div class="find-row">
-        <input id="find" type="search" placeholder="在会话中搜索" />
+        <input id="find" type="search" placeholder="Search this session" />
         <span id="find-count"></span>
-        <button id="find-prev" type="button" title="上一处">上一处</button>
-        <button id="find-next" type="button" title="下一处">下一处</button>
+        <button id="find-prev" type="button" title="Previous match">Previous</button>
+        <button id="find-next" type="button" title="Next match">Next</button>
       </div>
     </header>
     <div class="thread-wrap">
       <div id="thread" class="thread">
-        <div class="empty">从左侧选一条会话。</div>
+        <div class="empty">Select a session from the list.</div>
       </div>
-      <button id="jump" type="button" hidden>回到底部</button>
+      <button id="jump" type="button" hidden>Jump to bottom</button>
     </div>
     <section id="files" class="files" hidden></section>
     <section id="diffview" class="diffview" hidden></section>
     <form id="reply" class="reply">
-      <textarea id="reply-text" rows="2" placeholder="在这里回复，会发到当前打开的 OMP 窗口"></textarea>
+      <textarea id="reply-text" rows="2" placeholder="Reply here to send it to the open OMP window"></textarea>
       <div class="reply-row">
-        <span id="reply-notice">先从左边选一条会话。</span>
-        <button id="reply-send" type="submit">发送</button>
+        <span id="reply-notice">Select a session from the list.</span>
+        <button id="reply-send" type="submit">Send</button>
       </div>
     </form>
   </main>

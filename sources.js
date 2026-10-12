@@ -440,7 +440,7 @@ function buildFileDiff(patches, target) {
     const lines = diffLines(patch.before, patch.after);
     additions += lines.filter((line) => line.type === "add").length;
     deletions += lines.filter((line) => line.type === "del").length;
-    const title = patch.kind === "write" ? "写入" : `修改 ${++editIndex}`;
+    const title = patch.kind === "write" ? "Write" : `Edit ${++editIndex}`;
     const limit = 400;
     return {
       title,

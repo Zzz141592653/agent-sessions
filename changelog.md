@@ -1,22 +1,22 @@
 # 1.3.0
 
-自 1.2.5 以来。
+Since 1.2.5.
 
-## 会话
+## Sessions
 
-- 底部可以直接回复，发到当前打开的 OMP 窗口。回车发送。
-- 这一轮改过的文件可以分边或行内对比。
-- 会话可以隐藏；窗口关掉之后，记录可以移到废纸篓。
-- 引用块按引用显示，不再露出原文里的 `>`。
-- 还在处理的会话保持「处理中」，不会因为没点开就变成「新回应」。
-- 打开着的会话增量更新；会话列表按文件变更扫描，少做整库重读。
+- Reply from the bottom of the panel. The reply is sent to the open OMP window. Enter sends it.
+- Files changed in the current turn can be compared side by side or inline.
+- A session can be hidden. After its window is closed, the record can be moved to the Trash.
+- Quoted blocks render as quotes, without showing the source `>` characters.
+- A session that is still running stays "Running". It does not become "New reply" just because it was not opened.
+- The open session updates incrementally. The session list scans on file changes instead of rereading the whole library.
 
-## 文件评论
+## File comments
 
-- 从会话点开文件后，划选正文，右键选「评论」。高亮记的是当时圈中的位置。
-- 意见可以「发给这轮」，贴进当前打开的 OMP 窗口。
-- Markdown 里的 Mermaid 图会画出来。鼠标移到图的上沿，右上角出现「全屏」。
+- After opening a file from a session, select text and right-click Comment. The highlight stores the position at the time of the selection.
+- A comment can be sent to this turn, which pastes it into the open OMP window.
+- Mermaid diagrams in Markdown are rendered. Move the pointer to the top edge of a diagram and Full screen appears at the top right.
 
-## 输入框
+## Inputs
 
-- 搜索框、回复框和评论框里可以用 Cmd+A 全选。
+- Cmd+A selects all text in the search box, the reply box, and the comment box.

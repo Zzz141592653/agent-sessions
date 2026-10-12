@@ -206,7 +206,7 @@ function renderComments(comments, placed) {
   if (!comments.length) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = "划选正文后右键，选择评论。";
+    empty.textContent = "Select text, then right-click and choose Comment.";
     commentsEl.append(empty);
     return;
   }
@@ -219,15 +219,15 @@ function renderComments(comments, placed) {
     body.textContent = comment.body;
     const del = document.createElement("button");
     del.type = "button";
-    del.textContent = "删除";
+    del.textContent = "Delete";
     del.addEventListener("click", () => vscode.postMessage({ type: "delete", id: comment.id }));
     card.append(quote, body, del);
     if (!comment.stale && !placed.has(comment.id)) {
       const note = document.createElement("p");
       note.className = "empty";
       note.textContent = Number.isInteger(comment.from)
-        ? "原文已经变了，对不上当时圈的位置。"
-        : "这条没有记下位置。重新圈一次才会标在正文上。";
+        ? "The text changed, so this no longer matches the original selection."
+        : "This comment has no saved position. Select the text again to highlight it.";
       card.append(note);
     }
     commentsEl.append(card);
@@ -473,7 +473,7 @@ function renderDiagrams(root) {
       const zoom = document.createElement("button");
       zoom.type = "button";
       zoom.className = "mermaid-zoom";
-      zoom.textContent = "全屏";
+      zoom.textContent = "Full screen";
       zoom.addEventListener("click", () => openDiagram(svg));
       const showZoom = (event) => {
         const top = event.clientY - host.getBoundingClientRect().top;
