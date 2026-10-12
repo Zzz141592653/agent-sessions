@@ -7,6 +7,7 @@ const vscode = require("vscode");
 const MarkdownIt = require("markdown-it");
 
 const { normalizeRecord, openRound, noteLiveFile, closeRound, hashText } = require("./comments");
+const { panelIsOpen, releaseClosedPanel } = require("./panel-life");
 
 const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
 const MAX_BYTES = 2_000_000;
@@ -33,6 +34,10 @@ function openReviewedFile(context, location, session) {
       preview: false,
     });
   }
+  if (view && !panelIsOpen(view.panel)) {
+    view.watcher?.dispose();
+    view = undefined;
+  }
   if (!view) view = new FileView(context);
   return view.show(location, session);
 }
@@ -44,12 +49,18 @@ class FileView {
       enableScripts: true,
       retainContextWhenHidden: true,
     });
-    this.panel.webview.onDidReceiveMessage((message) => this.onMessage(message));
-    this.panel.webview.html = htmlFor(context, this.panel.webview);
+    const webview = this.panel.webview;
+    webview.onDidReceiveMessage((message) => this.onMessage(message));
+    webview.html = htmlFor(context, webview);
     this.panel.onDidDispose(() => {
-      noteInputFocus(this.panel.webview, false);
-      this.watcher?.dispose();
-      if (view === this) view = undefined;
+      const watcher = this.watcher;
+      releaseClosedPanel(
+        () => {
+          watcher?.dispose();
+          if (view === this) view = undefined;
+        },
+        () => noteInputFocus(webview, false)
+      );
     });
     this.record = normalizeRecord(null);
     this.viewing = "";
@@ -93,7 +104,7 @@ class FileView {
 
   async onMessage(message) {
     if (message.type === "inputFocus") {
-      noteInputFocus(this.panel.webview, message.focused === true);
+      if (panelIsOpen(this.panel)) noteInputFocus(this.panel.webview, message.focused === true);
       return;
     }
     if (message.type === "ready") {
@@ -241,6 +252,7 @@ class FileView {
       ? `<p class="empty">The file text for this review was not kept.</p>`
       : (isMarkdown(this.file) ? renderMarkdown(source) : renderText(source));
     const snapshotPath = this.diffSnapshot();
+    if (!panelIsOpen(this.panel)) return;
     await this.panel.webview.postMessage({
       type: "state",
       fileName: path.basename(this.file),

@@ -5,6 +5,7 @@ const { execFileSync } = require("child_process");
 const vscode = require("vscode");
 const { listSessions, createTranscriptReader, readTranscript, snapshotTranscript, buildFileDiff, ompRoots, hasConversationEntries } = require("./sources");
 const { openReviewedFile, liveTty, pasteIntoTerminal, noteInputFocus, selectAllInInput } = require("./review");
+const { panelIsOpen, releaseClosedPanel } = require("./panel-life");
 
 const SCAN_MS = 60_000;
 const PROBE_MS = 2_000;
@@ -66,7 +67,15 @@ function activate(context) {
   }
 }
 
+function releaseLibrary() {
+  panel = undefined;
+  openKey = "";
+  postedReply = "";
+  stopFollow();
+}
+
 function openPanel(context, reveal) {
+  if (panel && !panelIsOpen(panel)) releaseLibrary();
   if (panel) {
     if (reveal) panel.reveal(vscode.ViewColumn.Active);
     postSessions();
@@ -78,9 +87,10 @@ function openPanel(context, reveal) {
     vscode.ViewColumn.Active,
     { enableScripts: true, retainContextWhenHidden: true }
   );
-  panel.webview.html = htmlFor(context, panel.webview);
-  panel.webview.onDidReceiveMessage((message) => {
-    if (message.type === "inputFocus") noteInputFocus(panel.webview, message.focused === true);
+  const webview = panel.webview;
+  webview.html = htmlFor(context, webview);
+  webview.onDidReceiveMessage((message) => {
+    if (message.type === "inputFocus") noteInputFocus(webview, message.focused === true);
     if (message.type === "ready") postSessions();
     if (message.type === "open") openSession(message.key);
     if (message.type === "refresh") {
@@ -95,11 +105,7 @@ function openPanel(context, reveal) {
     if (message.type === "deleteSession") deleteSession(message.key);
   });
   panel.onDidDispose(() => {
-    noteInputFocus(panel.webview, false);
-    panel = undefined;
-    openKey = "";
-    postedReply = "";
-    stopFollow();
+    releaseClosedPanel(releaseLibrary, () => noteInputFocus(webview, false));
   });
 }
 
@@ -134,7 +140,12 @@ function postSessions() {
     session.hidden = hidden.has(session.key);
   }
   updateStatus();
-  panel?.webview.postMessage({ type: "sessions", sessions });
+  if (!panel) return;
+  if (!panelIsOpen(panel)) {
+    releaseLibrary();
+    return;
+  }
+  panel.webview.postMessage({ type: "sessions", sessions });
 }
 
 function hiddenSet() {

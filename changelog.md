@@ -1,3 +1,9 @@
+# 1.4.1
+
+Since 1.4.0.
+
+- Closing the session library and opening it again from the status bar works. The same applies to a file comment view.
+
 # 1.4.0
 
 Since 1.3.0.
