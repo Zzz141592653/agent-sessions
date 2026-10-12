@@ -1,0 +1,1053 @@
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { execFileSync } = require("child_process");
+const vscode = require("vscode");
+const { listSessions, createTranscriptReader, readTranscript, snapshotTranscript, buildFileDiff, ompRoots } = require("./sources");
+const { openReviewedFile, liveTty, pasteIntoTerminal, noteInputFocus, selectAllInInput } = require("./review");
+
+const SCAN_MS = 60_000;
+const PROBE_MS = 2_000;
+const QUIET_MS = 15_000;
+const WAITING_MS = 2 * 60_000;
+
+let panel;
+let sessions = [];
+let openKey = "";
+let scanTimer;
+let follow;
+let extensionContext;
+let statusItem;
+let seenSizes = {};
+let hasBaseline = false;
+let catalogTimer;
+let postTimer;
+const activity = new Map();
+const activityTimers = new Map();
+const libraryWatchers = new Map();
+const sessionPatches = new Map();
+
+function activate(context) {
+  extensionContext = context;
+  seenSizes = { ...(context.globalState.get("seenSizes") || {}) };
+  hasBaseline = context.globalState.get("activityBaseline") === true;
+  const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusItem = status;
+  status.text = "$(comment-discussion) Sessions";
+  status.tooltip = "按来源查看 OMP 和 Claude Code 会话";
+  status.command = "agentSessions.open";
+  status.show();
+
+  context.subscriptions.push(
+    status,
+    vscode.commands.registerCommand("agentSessions.open", () => openPanel(context, true)),
+    vscode.commands.registerCommand("agentSessions.selectAll", () => selectAllInInput()),
+    {
+      dispose: () => {
+        clearInterval(scanTimer);
+        clearTimeout(catalogTimer);
+        clearTimeout(postTimer);
+        for (const timer of activityTimers.values()) clearTimeout(timer);
+        for (const watcher of libraryWatchers.values()) watcher.close();
+        stopFollow();
+      },
+    }
+  );
+
+  scanTimer = setInterval(() => {
+    refresh();
+    postSessions();
+  }, SCAN_MS);
+
+  refresh();
+  if (!context.globalState.get("autoOpened")) {
+    context.globalState.update("autoOpened", true);
+    openPanel(context, true);
+  }
+}
+
+function openPanel(context, reveal) {
+  if (panel) {
+    if (reveal) panel.reveal(vscode.ViewColumn.Active);
+    postSessions();
+    return;
+  }
+  panel = vscode.window.createWebviewPanel(
+    "agentSessions",
+    "Sessions",
+    vscode.ViewColumn.Active,
+    { enableScripts: true, retainContextWhenHidden: true }
+  );
+  panel.webview.html = htmlFor(context, panel.webview);
+  panel.webview.onDidReceiveMessage((message) => {
+    if (message.type === "inputFocus") noteInputFocus(panel.webview, message.focused === true);
+    if (message.type === "ready") postSessions();
+    if (message.type === "open") openSession(message.key);
+    if (message.type === "refresh") {
+      refresh();
+      postSessions();
+    }
+    if (message.type === "openLink") openLink(message.href);
+    if (message.type === "reply") replyToSession(message.text);
+    if (message.type === "fileDiff") postFileDiff(message.path);
+    if (message.type === "hide") hideSession(message.key);
+    if (message.type === "unhide") unhideSession(message.key);
+    if (message.type === "deleteSession") deleteSession(message.key);
+  });
+  panel.onDidDispose(() => {
+    noteInputFocus(panel.webview, false);
+    panel = undefined;
+    openKey = "";
+    postedReply = "";
+    stopFollow();
+  });
+}
+
+function refresh() {
+  const previous = sessions.find((session) => session.key === openKey);
+  const folders = (vscode.workspace.workspaceFolders || []).map((folder) => folder.uri.fsPath);
+  try {
+    sessions = listSessions(folders);
+  } catch (error) {
+    console.error("Failed to index sessions", error);
+    sessions = [];
+  }
+  reconcileActivity();
+  watchLibraries();
+  const next = sessions.find((session) => session.key === openKey);
+  const changed = Boolean(previous && next && (next.mtime !== previous.mtime || next.size !== previous.size));
+  if (follow && next && follow.filePath === next.filePath && !(changed && follow.reader)) follow.size = next.size;
+  if (changed) {
+    if (follow?.filePath === next.filePath && follow.reader) scheduleLive();
+    else {
+      openSession(openKey, { live: true, following: Boolean(follow?.watcher) });
+      if (follow && !follow.watcher) attachWatch();
+    }
+  }
+  postReplyState();
+}
+
+function postSessions() {
+  const hidden = hiddenSet();
+  for (const session of sessions) {
+    session.activity = activity.get(session.key)?.state || "";
+    session.hidden = hidden.has(session.key);
+  }
+  updateStatus();
+  panel?.webview.postMessage({ type: "sessions", sessions });
+}
+
+function hiddenSet() {
+  return new Set(extensionContext?.globalState.get("hiddenSessions") || []);
+}
+
+async function rememberHidden(keys) {
+  await extensionContext.globalState.update("hiddenSessions", [...keys]);
+}
+
+async function hideSession(key) {
+  const hidden = hiddenSet();
+  hidden.add(String(key || ""));
+  await rememberHidden(hidden);
+  if (openKey === key) closeOpenSession();
+  postSessions();
+}
+
+async function unhideSession(key) {
+  const hidden = hiddenSet();
+  hidden.delete(String(key || ""));
+  await rememberHidden(hidden);
+  postSessions();
+}
+
+function closeOpenSession() {
+  openKey = "";
+  postedReply = "";
+  stopFollow();
+  panel?.webview.postMessage({ type: "closed" });
+}
+
+function sessionIsLive(session) {
+  if (session.source === "omp") return Boolean(liveTty(session));
+  if (session.source !== "claude") return true;
+  const id = path.basename(session.filePath, ".jsonl");
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return true;
+  try {
+    const commands = execFileSync("ps", ["-ax", "-o", "command="], { encoding: "utf8", maxBuffer: 4_000_000 });
+    return commands.split("\n").some((line) => line.includes(id) && /(^|[/\s])claude(\s|$)/.test(line));
+  } catch {
+    return true;
+  }
+}
+
+function trashTargets(session) {
+  const home = os.homedir();
+  const roots = [
+    path.join(home, ".omp", "agent", "sessions"),
+    path.join(home, ".omp", "agent", "terminal-sessions"),
+    path.join(home, ".claude", "projects"),
+  ];
+  const allowed = (target) => {
+    const resolved = path.resolve(target);
+    return roots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
+  };
+  const targets = [];
+  const add = (target) => {
+    if (!target || !allowed(target) || !fs.existsSync(target) || targets.includes(target)) return;
+    targets.push(target);
+  };
+  add(session.filePath);
+  add(session.filePath.replace(/\.jsonl$/, ""));
+  if (session.source === "omp") {
+    const dir = path.join(home, ".omp", "agent", "terminal-sessions");
+    for (const name of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
+      const file = path.join(dir, name);
+      try {
+        if (fs.readFileSync(file, "utf8").includes(session.filePath)) add(file);
+      } catch {
+        // Skip a mapping file that cannot be read.
+      }
+    }
+  }
+  return targets;
+}
+
+async function deleteSession(key) {
+  const session = sessions.find((item) => item.key === key);
+  if (!session) return;
+  if (sessionIsLive(session)) {
+    void vscode.window.showWarningMessage("这一轮的窗口还开着。先关掉它，再删除原来的会话。");
+    return;
+  }
+  const choice = await vscode.window.showWarningMessage(
+    `把「${session.title}」从 ${session.sourceLabel} 移到废纸篓？列表里也不会再出现。`,
+    { modal: true },
+    "移到废纸篓"
+  );
+  if (choice !== "移到废纸篓") return;
+  if (sessionIsLive(session)) {
+    void vscode.window.showWarningMessage("这一轮的窗口还开着。先关掉它，再删除原来的会话。");
+    return;
+  }
+  const targets = trashTargets(session);
+  if (!targets.length) {
+    void vscode.window.showWarningMessage("没有找到可以删除的会话记录。");
+    return;
+  }
+  for (const target of targets) {
+    await vscode.workspace.fs.delete(vscode.Uri.file(target), { recursive: true, useTrash: true });
+  }
+  const hidden = hiddenSet();
+  hidden.delete(session.key);
+  await rememberHidden(hidden);
+  sessionPatches.delete(session.key);
+  if (openKey === session.key) closeOpenSession();
+  refresh();
+  postSessions();
+}
+
+function postSessionsSoon() {
+  clearTimeout(postTimer);
+  postTimer = setTimeout(postSessions, 300);
+}
+
+function openSession(key, options = {}) {
+  const session = sessions.find((item) => item.key === key);
+  if (!session || !panel) return;
+  openKey = key;
+  if (!options.live) {
+    ensureFollow(session);
+    follow.reader = createTranscriptReader(session.filePath, session.source);
+    follow.view = null;
+    markSeen(session);
+    postSessions();
+  }
+  try {
+    postTranscript(session, options);
+  } catch (error) {
+    panel.webview.postMessage({
+      type: "transcript",
+      key,
+      transcript: { title: session.title, omitted: 0, turns: [{ role: "assistant", text: error.message, thinking: "", tools: [] }] },
+    });
+  }
+}
+
+function postTranscript(session, options) {
+  if (!follow || follow.filePath !== session.filePath || !follow.reader) {
+    if (!follow || follow.filePath !== session.filePath) ensureFollow(session);
+    follow.reader = createTranscriptReader(session.filePath, session.source);
+    follow.view = null;
+  }
+  readTranscript(follow.reader);
+  const next = snapshotTranscript(follow.reader);
+  const patch = options.live ? diffTranscript(follow.view, next) : { full: true };
+  follow.view = {
+    title: next.title,
+    omitted: next.omitted,
+    files: next.files,
+    turns: next.turns,
+    sigs: next.turns.map(turnSignature),
+  };
+  sessionPatches.set(session.key, next.patches || []);
+  const reply = replyState(session);
+  const following = options.following === true || Boolean(follow.watcher);
+  if (!patch.full) {
+    panel.webview.postMessage({
+      type: "transcriptPatch",
+      key: session.key,
+      dropped: patch.dropped,
+      updates: patch.updates,
+      appended: patch.appended,
+      omitted: next.omitted,
+      title: next.title,
+      files: patch.files,
+      live: true,
+      following,
+    });
+    return;
+  }
+  panel.webview.postMessage({
+    type: "transcript",
+    key: session.key,
+    transcript: {
+      title: next.title,
+      omitted: next.omitted,
+      files: next.files,
+      turns: next.turns,
+    },
+    live: options.live === true,
+    following,
+    canReply: reply.canReply,
+    replyHint: reply.hint,
+  });
+}
+
+function diffTranscript(prev, next) {
+  if (!prev) return { full: true };
+  const prevTurns = prev.turns;
+  const nextTurns = next.turns;
+  let dropped = 0;
+  while (dropped < prevTurns.length && !nextTurns.includes(prevTurns[dropped])) dropped += 1;
+  const kept = prevTurns.length - dropped;
+  for (let index = 0; index < kept; index += 1) {
+    if (nextTurns[index] !== prevTurns[dropped + index]) return { full: true };
+  }
+  if (nextTurns.length < kept) return { full: true };
+  const updates = [];
+  for (let index = 0; index < kept; index += 1) {
+    if (turnSignature(nextTurns[index]) !== prev.sigs[dropped + index]) updates.push({ index, turn: nextTurns[index] });
+  }
+  const appended = nextTurns.slice(kept);
+  const files = filesSignature(prev.files) === filesSignature(next.files) ? undefined : next.files;
+  return { full: false, dropped, updates, appended, files };
+}
+
+function turnSignature(turn) {
+  const tools = (turn.tools || []).map((tool) => `${tool.id}\u0001${tool.name}\u0001${tool.isError ? 1 : 0}\u0001${tool.output || ""}`).join("\u0002");
+  return `${turn.role}\u0001${turn.text || ""}\u0001${turn.thinking || ""}\u0001${tools}`;
+}
+
+function filesSignature(files) {
+  return (files || []).map((file) => `${file.path}\u0001${file.additions}\u0001${file.deletions}`).join("\n");
+}
+
+function postFileDiff(target) {
+  if (!panel || !openKey) return;
+  const diff = buildFileDiff(sessionPatches.get(openKey) || [], String(target || ""));
+  panel.webview.postMessage({ type: "fileDiff", path: String(target || ""), ...diff });
+}
+
+let postedReply = "";
+
+function postReplyState() {
+  if (!panel || !openKey) return;
+  const session = sessions.find((item) => item.key === openKey);
+  const reply = replyState(session);
+  const token = `${openKey}\n${reply.canReply}\n${reply.hint}`;
+  if (token === postedReply) return;
+  postedReply = token;
+  panel.webview.postMessage({ type: "replyState", canReply: reply.canReply, replyHint: reply.hint });
+}
+
+function replyState(session) {
+  if (!session || session.source !== "omp") {
+    return { canReply: false, hint: "先选一条 OMP 会话。这里的回复会发到那个正在开着的窗口。" };
+  }
+  if (!liveTty(session)) {
+    return { canReply: false, hint: "这一轮的窗口没开着。先在终端里打开它，回复才会出现在那里。" };
+  }
+  return { canReply: true, hint: "在这里回复，会发到当前打开的 OMP 窗口。回车发送。" };
+}
+
+async function replyToSession(text) {
+  const body = String(text || "").trim();
+  if (!body || !panel) return;
+  const session = sessions.find((item) => item.key === openKey);
+  const reply = replyState(session);
+  if (!reply.canReply) {
+    panel.webview.postMessage({ type: "replyResult", ok: false, notice: reply.hint });
+    return;
+  }
+  try {
+    await pasteIntoTerminal(liveTty(session), body);
+    panel.webview.postMessage({ type: "replyResult", ok: true, notice: "已发到当前 OMP 窗口。" });
+  } catch (error) {
+    panel.webview.postMessage({
+      type: "replyResult",
+      ok: false,
+      notice: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function ensureFollow(session) {
+  if (follow?.filePath === session.filePath) return;
+  stopFollow();
+  let size = session.size || 0;
+  try {
+    size = fs.statSync(session.filePath).size;
+  } catch {
+    // The catalog size is enough until the file reappears.
+  }
+  follow = { key: session.key, filePath: session.filePath, size };
+  follow.probe = setInterval(() => probeFollow(), PROBE_MS);
+}
+
+function probeFollow() {
+  if (!follow) return;
+  postReplyState();
+  let stat;
+  try {
+    stat = fs.statSync(follow.filePath);
+  } catch {
+    return;
+  }
+  if (stat.size <= follow.size) return;
+  if (!follow.watcher) attachWatch();
+  scheduleLive();
+}
+
+function attachWatch() {
+  if (!follow || follow.watcher) return;
+  try {
+    follow.watcher = fs.watch(follow.filePath, () => scheduleLive());
+  } catch {
+    return;
+  }
+  panel?.webview.postMessage({ type: "follow", following: true });
+}
+
+function scheduleLive() {
+  if (!follow) return;
+  clearTimeout(follow.debounce);
+  follow.debounce = setTimeout(flushLive, 250);
+}
+
+function flushLive() {
+  if (!follow) return;
+  const session = sessions.find((item) => item.key === follow.key);
+  if (!session) return;
+  let stat;
+  try {
+    stat = fs.statSync(follow.filePath);
+  } catch {
+    return;
+  }
+  if (stat.size < follow.size) follow.size = 0;
+  if (stat.size === follow.size) {
+    armQuiet();
+    return;
+  }
+  follow.size = stat.size;
+  session.mtime = stat.mtimeMs;
+  session.size = stat.size;
+  markRunning(session);
+  openSession(follow.key, { live: true, following: true });
+  postSessions();
+  armQuiet();
+}
+
+function armQuiet() {
+  if (!follow) return;
+  clearTimeout(follow.quiet);
+  follow.quiet = setTimeout(() => {
+    if (!follow?.watcher) return;
+    follow.watcher.close();
+    follow.watcher = undefined;
+    panel?.webview.postMessage({ type: "follow", following: false });
+  }, QUIET_MS);
+}
+
+function stopFollow() {
+  if (!follow) return;
+  clearInterval(follow.probe);
+  clearTimeout(follow.debounce);
+  clearTimeout(follow.quiet);
+  follow.watcher?.close();
+  follow = undefined;
+}
+
+function libraryRoots() {
+  return [...ompRoots(), path.join(os.homedir(), ".claude", "projects")];
+}
+
+function watchLibraries() {
+  const wanted = new Set();
+  for (const root of libraryRoots()) {
+    if (!fs.existsSync(root)) continue;
+    wanted.add(root);
+    for (const name of fs.readdirSync(root)) {
+      const dir = path.join(root, name);
+      try {
+        if (fs.statSync(dir).isDirectory()) wanted.add(dir);
+      } catch {
+        // A project directory that disappeared between read and stat is skipped.
+      }
+    }
+  }
+  for (const [dir, watcher] of libraryWatchers) {
+    if (wanted.has(dir)) continue;
+    watcher.close();
+    libraryWatchers.delete(dir);
+  }
+  for (const dir of wanted) watchOne(dir);
+}
+
+function watchOne(dir) {
+  if (libraryWatchers.has(dir) || !fs.existsSync(dir)) return;
+  try {
+    const watcher = fs.watch(dir, (_event, filename) => onLibraryEvent(dir, filename));
+    libraryWatchers.set(dir, watcher);
+  } catch {
+    // A directory that cannot be watched still shows up on the minute scan.
+  }
+}
+
+function onLibraryEvent(dir, filename) {
+  const name = filename ? path.basename(String(filename)) : "";
+  if (!name) {
+    scheduleCatalog();
+    return;
+  }
+  if (!name.endsWith(".jsonl")) {
+    if (name.startsWith(".")) return;
+    if (!libraryRoots().includes(dir)) return;
+    const full = path.join(dir, name);
+    try {
+      if (fs.statSync(full).isDirectory()) {
+        watchOne(full);
+        scheduleCatalog();
+      }
+    } catch {
+      // The new name can already be gone.
+    }
+    return;
+  }
+  const full = path.join(dir, name);
+  const session = sessions.find((item) => item.filePath === full);
+  if (session) noteGrowth(session);
+  else scheduleCatalog();
+}
+
+function scheduleCatalog() {
+  clearTimeout(catalogTimer);
+  catalogTimer = setTimeout(() => {
+    refresh();
+    postSessions();
+  }, 2000);
+}
+
+function noteGrowth(session) {
+  let stat;
+  try {
+    stat = fs.statSync(session.filePath);
+  } catch {
+    return;
+  }
+  if (stat.size === session.size) return;
+  const grew = stat.size > session.size;
+  session.size = stat.size;
+  session.mtime = stat.mtimeMs;
+  if (!grew) {
+    postSessionsSoon();
+    return;
+  }
+  markRunning(session);
+  if (follow?.filePath === session.filePath) {
+    if (!follow.watcher) attachWatch();
+    scheduleLive();
+  }
+  postSessionsSoon();
+}
+
+function markRunning(session) {
+  const current = activity.get(session.key);
+  if (!current || current.state !== "running") activity.set(session.key, { state: "running", since: Date.now() });
+  session.activity = "running";
+  armActivityQuiet(session.key);
+}
+
+function markSeen(session) {
+  seenSizes[session.key] = session.size;
+  if (activity.get(session.key)?.state === "fresh") {
+    activity.delete(session.key);
+    session.activity = "";
+  }
+  persistSeen();
+}
+
+function armActivityQuiet(key) {
+  clearTimeout(activityTimers.get(key));
+  activityTimers.set(key, setTimeout(() => settleActivity(key), QUIET_MS));
+}
+
+function settleActivity(key) {
+  activityTimers.delete(key);
+  const info = activity.get(key);
+  const session = sessions.find((item) => item.key === key);
+  if (!info || info.state !== "running" || !session) return;
+  let stat;
+  try {
+    stat = fs.statSync(session.filePath);
+  } catch {
+    return;
+  }
+  if (stat.size !== session.size) {
+    session.size = stat.size;
+    session.mtime = stat.mtimeMs;
+    if (follow?.filePath === session.filePath) scheduleLive();
+    armActivityQuiet(key);
+    postSessionsSoon();
+    return;
+  }
+  const phase = tailPhase(session);
+  if (phase === "busy" || phase === "unknown" || (phase === "waiting" && Date.now() - info.since < WAITING_MS)) {
+    armActivityQuiet(key);
+    return;
+  }
+  if (key === openKey || phase !== "reply" || session.size <= (seenSizes[key] ?? 0)) {
+    seenSizes[key] = session.size;
+    activity.delete(key);
+    session.activity = "";
+    persistSeen();
+  } else {
+    activity.set(key, { state: "fresh", since: Date.now() });
+    session.activity = "fresh";
+  }
+  postSessions();
+}
+
+function reconcileActivity() {
+  if (!hasBaseline) {
+    for (const session of sessions) seenSizes[session.key] = session.size;
+    hasBaseline = true;
+    persistSeen();
+  } else {
+    for (const session of sessions) {
+      const seen = seenSizes[session.key];
+      if (seen == null) {
+        noteUnseen(session);
+        continue;
+      }
+      if (session.size <= seen || activity.get(session.key)?.state === "running") continue;
+      if (Date.now() - session.mtime < QUIET_MS) {
+        activity.set(session.key, { state: "running", since: session.mtime });
+        armActivityQuiet(session.key);
+      } else if (session.key === openKey) {
+        seenSizes[session.key] = session.size;
+      } else if (tailPhase(session) === "reply") {
+        activity.set(session.key, { state: "fresh", since: session.mtime });
+      } else {
+        activity.set(session.key, { state: "running", since: session.mtime });
+        armActivityQuiet(session.key);
+      }
+    }
+  }
+  for (const key of [...activity.keys()]) {
+    if (!sessions.some((session) => session.key === key)) activity.delete(key);
+  }
+  for (const session of sessions) session.activity = activity.get(session.key)?.state || "";
+}
+
+function noteUnseen(session) {
+  if (!(session.size > 0) || session.key === openKey) {
+    seenSizes[session.key] = session.size;
+    return;
+  }
+  const settled = Date.now() - session.mtime >= QUIET_MS && tailPhase(session) === "reply";
+  if (settled) {
+    activity.set(session.key, { state: "fresh", since: session.mtime });
+    return;
+  }
+  activity.set(session.key, { state: "running", since: session.mtime || Date.now() });
+  armActivityQuiet(session.key);
+}
+
+function persistSeen() {
+  extensionContext?.globalState.update("seenSizes", seenSizes);
+  extensionContext?.globalState.update("activityBaseline", true);
+}
+
+function updateStatus() {
+  if (!statusItem) return;
+  const folders = vscode.workspace.workspaceFolders || [];
+  const pool = folders.length ? sessions.filter((session) => session.inWorkspace) : sessions;
+  const running = pool.filter((session) => session.activity === "running").length;
+  const fresh = pool.filter((session) => session.activity === "fresh").length;
+  if (!running && !fresh) {
+    statusItem.text = "$(comment-discussion) Sessions";
+    return;
+  }
+  const bits = [];
+  if (running) bits.push(`${running} 处理中`);
+  if (fresh) bits.push(`${fresh} 新回应`);
+  statusItem.text = `$(comment-discussion) ${bits.join(" · ")}`;
+}
+
+function tailPhase(session) {
+  let entries = [];
+  try {
+    entries = readTailEntries(session.filePath);
+  } catch {
+    return "unknown";
+  }
+  let phase = "unknown";
+  if (session.source === "omp") phase = ompTailPhase(entries);
+  else if (session.source === "claude") phase = claudeTailPhase(entries);
+  if (phase === "unknown") {
+    try {
+      phase = peekLastRecordPhase(session.source, session.filePath);
+    } catch {
+      return "unknown";
+    }
+  }
+  if (phase === "reply" && session.source === "omp" && ompChildrenRecent(session)) return "busy";
+  return phase;
+}
+
+function readTailEntries(filePath) {
+  const stat = fs.statSync(filePath);
+  let len = Math.min(stat.size, 64 * 1024);
+  const max = Math.min(stat.size, 512 * 1024);
+  let entries = [];
+  while (true) {
+    entries = readTailSlice(filePath, stat.size, len);
+    if (entries.length || len >= max) return entries;
+    const next = Math.min(max, len * 4);
+    if (next === len) return entries;
+    len = next;
+  }
+}
+
+function readTailSlice(filePath, size, len) {
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, Math.max(0, size - len));
+    const lines = buf.toString("utf8").split("\n");
+    if (size > len) lines.shift();
+    const entries = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("{")) continue;
+      try {
+        entries.push(JSON.parse(trimmed));
+      } catch {
+        // The last line can still be incomplete.
+      }
+    }
+    return entries;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function peekLastRecordPhase(source, filePath) {
+  const head = readLastRecordHead(filePath);
+  if (!head) return "unknown";
+  const tail = readFileEnding(filePath, 1200);
+  if (source === "omp") return peekOmpPhase(head, tail);
+  if (source === "claude") return peekClaudePhase(head, tail);
+  return "unknown";
+}
+
+function peekOmpPhase(head, tail) {
+  if (/"role"\s*:\s*"toolResult"/.test(head)) return "busy";
+  if (/"customType"\s*:\s*"tool_execution_start"/.test(head)) return "busy";
+  if (/"role"\s*:\s*"user"/.test(head)) return "waiting";
+  if (/"role"\s*:\s*"assistant"/.test(head)) {
+    if (/"stopReason"\s*:\s*"toolUse"/.test(tail) || /"type"\s*:\s*"toolCall"/.test(head)) return "busy";
+    if (/"stopReason"\s*:\s*"(?:stop|end_turn)"/.test(tail)) return "reply";
+    return "busy";
+  }
+  return "unknown";
+}
+
+function peekClaudePhase(head, tail) {
+  if (/"type"\s*:\s*"tool_result"/.test(head)) return "busy";
+  if (/"type"\s*:\s*"assistant"/.test(head) || /"role"\s*:\s*"assistant"/.test(head)) {
+    if (/"stop_reason"\s*:\s*"tool_use"/.test(tail)) return "busy";
+    if (/"stop_reason"\s*:\s*"(?:end_turn|stop_sequence)"/.test(tail)) return "reply";
+    return "busy";
+  }
+  if (/"type"\s*:\s*"user"/.test(head)) return "waiting";
+  return "unknown";
+}
+
+function readLastRecordHead(filePath) {
+  const stat = fs.statSync(filePath);
+  const fd = fs.openSync(filePath, "r");
+  try {
+    let pos = stat.size;
+    const limit = Math.max(0, stat.size - 8 * 1024 * 1024);
+    let start = 0;
+    let found = false;
+    while (pos > limit) {
+      const len = Math.min(64 * 1024, pos - limit);
+      pos -= len;
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, pos);
+      let index = len - 1;
+      if (pos + len === stat.size) {
+        while (index >= 0 && (buf[index] === 10 || buf[index] === 13)) index -= 1;
+      }
+      for (; index >= 0; index -= 1) {
+        if (buf[index] === 10) {
+          start = pos + index + 1;
+          found = true;
+          break;
+        }
+      }
+      if (found) break;
+    }
+    const from = found ? start : limit;
+    const len = Math.min(2000, stat.size - from);
+    if (len <= 0) return "";
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, from);
+    return buf.toString("utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function readFileEnding(filePath, len) {
+  const stat = fs.statSync(filePath);
+  const size = Math.min(stat.size, len);
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const buf = Buffer.alloc(size);
+    fs.readSync(fd, buf, 0, size, Math.max(0, stat.size - size));
+    return buf.toString("utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function ompChildrenRecent(session) {
+  const dir = session.filePath.replace(/\.jsonl$/, "");
+  let names;
+  try {
+    if (!fs.statSync(dir).isDirectory()) return false;
+    names = fs.readdirSync(dir);
+  } catch {
+    return false;
+  }
+  const cutoff = Date.now() - WAITING_MS;
+  for (const name of names) {
+    if (!name.endsWith(".jsonl")) continue;
+    try {
+      if (fs.statSync(path.join(dir, name)).mtimeMs >= cutoff) return true;
+    } catch {
+      // A child record that cannot be stat'd does not keep the parent running.
+    }
+  }
+  return false;
+}
+
+function contentBlocks(content) {
+  if (Array.isArray(content)) return content;
+  if (content && typeof content === "object") return [content];
+  return [];
+}
+
+function ompTailPhase(entries) {
+  const pending = new Set();
+  const started = new Set();
+  let lastRole = "";
+  let sawMessage = false;
+  for (const entry of entries) {
+    if (entry.type === "custom" && entry.customType === "tool_execution_start" && entry.data?.toolCallId) {
+      started.add(entry.data.toolCallId);
+    }
+    if (entry.type !== "message" || !entry.message) continue;
+    sawMessage = true;
+    const message = entry.message;
+    lastRole = message.role || lastRole;
+    if (message.role === "user") pending.clear();
+    if (message.role === "assistant") {
+      for (const block of contentBlocks(message.content)) {
+        if (block.type === "toolCall" && block.id) pending.add(block.id);
+      }
+    }
+    if (message.role === "toolResult" && message.toolCallId) {
+      pending.delete(message.toolCallId);
+      started.delete(message.toolCallId);
+    }
+  }
+  if (pending.size || started.size || lastRole === "toolResult") return "busy";
+  if (!sawMessage) return "unknown";
+  if (lastRole === "user") return "waiting";
+  return "reply";
+}
+
+function claudeTailPhase(entries) {
+  let last = null;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry.type === "assistant" || entry.type === "user") {
+      last = entry;
+      break;
+    }
+  }
+  if (!last) return "unknown";
+  if (last.type === "assistant") {
+    const reason = last.message?.stop_reason;
+    if (!reason || reason === "tool_use") return "busy";
+    return "reply";
+  }
+  const blocks = contentBlocks(last.message?.content);
+  if (blocks.some((block) => block.type === "tool_result")) return "busy";
+  return "waiting";
+}
+
+async function openLink(raw) {
+  const href = String(raw || "").trim();
+  if (/^https?:\/\/\S+$/i.test(href)) {
+    await vscode.env.openExternal(vscode.Uri.parse(href));
+    return;
+  }
+  const location = fileLocation(href);
+  if (!location) return;
+  let stat;
+  try {
+    stat = fs.statSync(location.file);
+  } catch {
+    vscode.window.showWarningMessage(`找不到文件：${location.file}`);
+    return;
+  }
+  const uri = vscode.Uri.file(location.file);
+  if (stat.isDirectory()) {
+    await vscode.env.openExternal(uri);
+    return;
+  }
+  const session = sessions.find((item) => item.key === openKey);
+  try {
+    await openReviewedFile(extensionContext, location, session);
+  } catch {
+    await vscode.window.showTextDocument(uri, { viewColumn: vscode.ViewColumn.Active, preview: false });
+  }
+}
+
+function fileLocation(href) {
+  let file = "";
+  let line = 0;
+  let column = 0;
+  if (/^file:\/\/\S+$/i.test(href)) {
+    const stripped = stripLineSuffix(href);
+    file = vscode.Uri.parse(stripped.file).fsPath;
+    line = stripped.line;
+    column = stripped.column;
+  } else if (isLocalPath(href)) {
+    const stripped = stripLineSuffix(href);
+    file = stripped.file;
+    line = stripped.line;
+    column = stripped.column;
+  }
+  if (!file || !file.startsWith("/") || file.includes("..")) return null;
+  return { file, line, column };
+}
+
+function stripLineSuffix(value) {
+  const match = /:(\d+)(?::(\d+))?$/.exec(value);
+  if (!match || match.index === 0) return { file: value, line: 0, column: 0 };
+  return { file: value.slice(0, match.index), line: Number(match[1]), column: Number(match[2] || 1) };
+}
+
+function isLocalPath(value) {
+  const pathOnly = value.replace(/:\d+(?::\d+)?$/, "");
+  if (!pathOnly.startsWith("/") || pathOnly.includes("..")) return false;
+  if (/^\/(Users|Volumes|private|tmp|home|opt)\//.test(pathOnly)) return true;
+  return /\/[^/]+\.[A-Za-z0-9]{1,12}$/.test(pathOnly);
+}
+
+function htmlFor(context, webview) {
+  const css = fs.readFileSync(path.join(context.extensionPath, "media", "panel.css"), "utf8");
+  const script = fs.readFileSync(path.join(context.extensionPath, "media", "panel.js"), "utf8");
+  const nonce = String(Date.now());
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+  <style>${css}</style>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <h1>Sessions</h1>
+    </div>
+    <div class="controls">
+      <div class="search-row">
+        <input id="search" type="search" placeholder="搜索标题" />
+        <button id="refresh" type="button" title="马上重新扫描。平时每分钟扫一次">刷新</button>
+      </div>
+      <div class="chips">
+        <button class="chip active" data-source="all">全部</button>
+        <button class="chip" data-source="omp">OMP</button>
+        <button class="chip" data-source="claude">Claude Code</button>
+      </div>
+      <div class="chips">
+        <button class="scope active" data-scope="workspace">当前仓库</button>
+        <button class="scope" data-scope="all">全部仓库</button>
+      </div>
+    </div>
+    <div id="attention" class="attention" hidden></div>
+    <div id="list" class="list"></div>
+  </aside>
+  <main class="main">
+    <header class="thread-head">
+      <h2 id="title">选择一条会话</h2>
+      <div id="meta" class="meta"></div>
+      <div class="find-row">
+        <input id="find" type="search" placeholder="在会话中搜索" />
+        <span id="find-count"></span>
+        <button id="find-prev" type="button" title="上一处">上一处</button>
+        <button id="find-next" type="button" title="下一处">下一处</button>
+      </div>
+    </header>
+    <div class="thread-wrap">
+      <div id="thread" class="thread">
+        <div class="empty">从左侧选一条会话。</div>
+      </div>
+      <button id="jump" type="button" hidden>回到底部</button>
+    </div>
+    <section id="files" class="files" hidden></section>
+    <section id="diffview" class="diffview" hidden></section>
+    <form id="reply" class="reply">
+      <textarea id="reply-text" rows="2" placeholder="在这里回复，会发到当前打开的 OMP 窗口"></textarea>
+      <div class="reply-row">
+        <span id="reply-notice">先从左边选一条会话。</span>
+        <button id="reply-send" type="submit">发送</button>
+      </div>
+    </form>
+  </main>
+  <script nonce="${nonce}">${script}</script>
+</body>
+</html>`;
+}
+
+function deactivate() {}
+
+module.exports = { activate, deactivate };

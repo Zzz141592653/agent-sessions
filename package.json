@@ -1,0 +1,54 @@
+{
+  "name": "agent-sessions",
+  "displayName": "Agent Sessions",
+  "description": "Browse OMP and Claude Code sessions. Files opened from a session use the comment view.",
+  "version": "1.3.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "extensionKind": [
+    "ui"
+  ],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:agentSessions.open"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentSessions.open",
+        "title": "Sessions: 打开会话库"
+      },
+      {
+        "command": "agentSessions.selectAll",
+        "title": "Sessions: 全选输入框"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "agentSessions.selectAll",
+        "key": "ctrl+a",
+        "mac": "cmd+a",
+        "when": "agentSessionsInputFocused"
+      }
+    ]
+  },
+  "dependencies": {
+    "markdown-it": "^14.3.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Zzz141592653/agent-sessions.git"
+  },
+  "scripts": {
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.9.2"
+  }
+}
