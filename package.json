@@ -3,7 +3,8 @@
   "displayName": "Agent Sessions",
   "description": "Browse OMP and Claude Code sessions. Files opened from a session use the comment view.",
   "version": "1.4.1",
-  "publisher": "local",
+  "publisher": "jinxinyang",
+  "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
   },

@@ -22,6 +22,6 @@ Telling the agent "look at the file" leaves it to guess which sentence you mean.
 
 ## Install
 
-Download the `.vsix` from the [latest release](https://github.com/Zzz141592653/agent-sessions/releases/latest) and install it with **Extensions: Install from VSIX…**.
+In Cursor, open Extensions and search for **Agent Sessions** (`jinxinyang.agent-sessions`). The listing is on [Open VSX](https://open-vsx.org/extension/jinxinyang/agent-sessions).
 
-To build from this repository, run `npm install` and then `npm run package`.
+To build from this repository, run `npm install` and then `npm run package`. Install that `.vsix` with **Extensions: Install from VSIX…**.
