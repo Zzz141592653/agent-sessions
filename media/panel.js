@@ -1257,9 +1257,10 @@ function visibleMascotSources() {
   if (mode === "omp") return ["omp"];
   if (mode === "claude") return ["claude"];
   if (mode === "both") return ["omp", "claude"];
-  if (state.source === "omp") return ["omp"];
-  if (state.source === "claude") return ["claude"];
-  return ["omp", "claude"];
+  const selected = state.sessions.find((item) => item.key === state.selected);
+  if (selected && (selected.source === "omp" || selected.source === "claude")) return [selected.source];
+  if (state.source === "omp" || state.source === "claude") return [state.source];
+  return [state.sessions[0]?.source === "claude" ? "claude" : "omp"];
 }
 
 function formatSpendAmount(amount) {
@@ -1375,7 +1376,7 @@ function openMascotMenu(clientX, clientY) {
   if (!mascotMenu) return;
   mascotMenu.replaceChildren();
   const modes = [
-    { id: "auto", label: "Show: Auto (follow filter)" },
+    { id: "auto", label: "Show: Auto (follow session)" },
     { id: "both", label: "Show: Both (OMP & Claude)" },
     { id: "claude", label: "Show: Claude-tan only" },
     { id: "omp", label: "Show: OMP-tan only" },
