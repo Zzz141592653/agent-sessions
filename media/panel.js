@@ -282,12 +282,12 @@ function renderList() {
   const shown = matched.filter((session) => !session.hidden || session.activity === "fresh" || session.activity === "running");
   const hidden = matched.filter((session) => session.hidden && session.activity !== "fresh" && session.activity !== "running");
   const visible = shown.filter((session) => state.activity === "all" || session.activity === state.activity);
-  visible.sort((a, b) => activityRank(a) - activityRank(b) || b.mtime - a.mtime);
+  visible.sort((a, b) => b.mtime - a.mtime);
   hidden.sort((a, b) => b.mtime - a.mtime);
   renderAttention(shown);
   listEl.replaceChildren();
   if (!visible.length) listEl.append(el("div", "empty", emptyLabel()));
-  else appendSessionGroups(visible);
+  else appendSessions(visible);
   if (!hidden.length) return;
   const toggle = el("button", "hidden-toggle", state.showHidden ? `Hide ${hidden.length} hidden` : `${hidden.length} hidden`);
   toggle.type = "button";
@@ -296,25 +296,11 @@ function renderList() {
     renderList();
   });
   listEl.append(toggle);
-  if (state.showHidden) appendSessionGroups(hidden);
+  if (state.showHidden) appendSessions(hidden);
 }
 
-function appendSessionGroups(rows) {
-  const groups = new Map();
-  for (const session of rows) {
-    const items = groups.get(session.source) || [];
-    items.push(session);
-    groups.set(session.source, items);
-  }
-  for (const [source, items] of groups) {
-    const group = el("section", "group");
-    const heading = el("h2");
-    heading.append(el("span", `dot ${source}`));
-    heading.append(document.createTextNode(`${items[0].sourceLabel} · ${items.length}`));
-    group.append(heading);
-    for (const session of items) group.append(sessionRow(session));
-    listEl.append(group);
-  }
+function appendSessions(rows) {
+  for (const session of rows) listEl.append(sessionRow(session));
 }
 
 function sessionRow(session) {
@@ -322,7 +308,9 @@ function sessionRow(session) {
   const main = el("button", "session-main");
   main.type = "button";
   const titleRow = el("span", "title-row");
-  titleRow.append(el("span", "title", session.title));
+  const sourceTag = el("span", `source-tag ${session.source}`, session.source === "claude" ? "Claude" : session.sourceLabel);
+  sourceTag.title = session.sourceLabel;
+  titleRow.append(sourceTag, el("span", "title", session.title));
   if (session.activity === "running") titleRow.append(el("span", "badge running", "Running"));
   else if (session.activity === "fresh") titleRow.append(el("span", "badge fresh", "New reply"));
   main.append(titleRow);
@@ -366,12 +354,6 @@ function openSessionRow(session) {
   updateJump();
   renderList();
   vscode.postMessage({ type: "open", key: session.key });
-}
-
-function activityRank(session) {
-  if (session.activity === "running") return 0;
-  if (session.activity === "fresh") return 1;
-  return 2;
 }
 
 function setActivity(activity) {

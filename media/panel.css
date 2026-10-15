@@ -73,15 +73,31 @@ input[type="search"] {
   overflow: auto;
   padding: 0 8px 16px;
 }
-.group h2 {
-  position: sticky;
-  top: 0;
-  margin: 0;
-  padding: 10px 8px 4px;
-  background: var(--vscode-sideBar-background);
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 650;
+.source-tag {
+  flex: none;
+  margin-top: 1px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.source-tag.omp {
+  color: var(--omp);
+  background: color-mix(in srgb, var(--omp) 16%, transparent);
+}
+.source-tag.claude {
+  color: var(--claude);
+  background: color-mix(in srgb, var(--claude) 16%, transparent);
+}
+.source-tag.cursor {
+  color: var(--cursor);
+  background: color-mix(in srgb, var(--cursor) 16%, transparent);
+}
+.session.selected .source-tag {
+  color: inherit;
+  background: rgba(255, 255, 255, 0.16);
 }
 .session {
   display: grid;
