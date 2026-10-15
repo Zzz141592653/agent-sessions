@@ -59,17 +59,7 @@ function listOmp(folders, seen) {
       for (const name of safeReaddir(dir)) {
         if (!name.endsWith(".jsonl")) continue;
         const filePath = path.join(dir, name);
-        const meta = cachedHeader(filePath, seen, "omp", (entry, acc) => {
-          if (entry.type === "session") {
-            acc.cwd = entry.cwd || acc.cwd;
-            acc.timestamp = entry.timestamp || acc.timestamp;
-            if (!acc.title && entry.title) acc.title = entry.title;
-          }
-          if (!acc.preview && entry.type === "message" && entry.message?.role === "user") {
-            acc.preview = clip(messageText(entry.message).replace(/\s+/g, " ").trim(), 140);
-          }
-          noteOmpUsage(acc, entry);
-        });
+        const meta = cachedHeader(filePath, seen, "omp", visitOmpMeta);
         if (!meta) continue;
         sessions.push(summary("omp", filePath, meta, folders));
       }
@@ -87,21 +77,54 @@ function listClaude(folders, seen) {
     for (const name of safeReaddir(dir)) {
       if (!name.endsWith(".jsonl")) continue;
       const filePath = path.join(dir, name);
-      const meta = cachedHeader(filePath, seen, "claude", (entry, acc) => {
-        if (entry.isSidechain === true) acc.sidechain = true;
-        if (!acc.cwd && entry.cwd) acc.cwd = entry.cwd;
-        if (!acc.timestamp && entry.timestamp) acc.timestamp = entry.timestamp;
-        if (!acc.preview && entry.type === "user") {
-          const text = claudeUserText(entry);
-          if (text && !isMetaText(text)) acc.preview = clip(text.replace(/\s+/g, " ").trim(), 140);
-        }
-        noteClaudeUsage(acc, entry);
-      });
+      const meta = cachedHeader(filePath, seen, "claude", visitClaudeMeta);
       if (!meta) continue;
       sessions.push(summary("claude", filePath, meta, folders));
     }
   }
   return sessions;
+}
+
+function visitOmpMeta(entry, acc) {
+  if (entry.type === "session") {
+    acc.cwd = entry.cwd || acc.cwd;
+    acc.timestamp = entry.timestamp || acc.timestamp;
+    if (!acc.title && entry.title) acc.title = entry.title;
+  }
+  if (!acc.preview && entry.type === "message" && entry.message?.role === "user") {
+    acc.preview = clip(messageText(entry.message).replace(/\s+/g, " ").trim(), 140);
+  }
+  noteOmpUsage(acc, entry);
+}
+
+function visitClaudeMeta(entry, acc) {
+  if (entry.isSidechain === true) acc.sidechain = true;
+  if (!acc.cwd && entry.cwd) acc.cwd = entry.cwd;
+  if (!acc.timestamp && entry.timestamp) acc.timestamp = entry.timestamp;
+  if (!acc.preview && entry.type === "user") {
+    const text = claudeUserText(entry);
+    if (text && !isMetaText(text)) acc.preview = clip(text.replace(/\s+/g, " ").trim(), 140);
+  }
+  noteClaudeUsage(acc, entry);
+}
+
+function refreshSessionMeta(session) {
+  if (!session || !session.filePath) return session;
+  const visit = session.source === "omp" ? visitOmpMeta : session.source === "claude" ? visitClaudeMeta : null;
+  if (!visit) return session;
+  const meta = cachedHeader(session.filePath, new Set(), session.source, visit);
+  if (!meta) return session;
+  if (meta.title) session.title = short(meta.title, 72);
+  session.mtime = meta.mtime;
+  session.size = meta.size || 0;
+  session.model = meta.model || "";
+  session.contextTokens = meta.contextTokens || 0;
+  session.contextWindow = meta.contextWindow || 0;
+  session.totalTokens = meta.totalTokens || 0;
+  session.cost = meta.cost || 0;
+  session.todayCost = meta.todayCost || 0;
+  session.monthCost = meta.monthCost || 0;
+  return session;
 }
 
 function cachedHeader(filePath, seen, source, visit) {
@@ -1117,6 +1140,7 @@ function hasOmpProcess(commands) {
 module.exports = {
   SOURCES,
   listSessions,
+  refreshSessionMeta,
   loadTranscript,
   createTranscriptReader,
   readTranscript,

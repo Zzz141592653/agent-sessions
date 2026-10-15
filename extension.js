@@ -3,7 +3,7 @@ const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const vscode = require("vscode");
-const { listSessions, createTranscriptReader, readTranscript, snapshotTranscript, buildFileDiff, ompRoots, hasConversationEntries } = require("./sources");
+const { listSessions, refreshSessionMeta, createTranscriptReader, readTranscript, snapshotTranscript, buildFileDiff, ompRoots, hasConversationEntries } = require("./sources");
 const { openReviewedFile, liveTty, pasteIntoTerminal, noteInputFocus, selectAllInInput } = require("./review");
 const { panelIsOpen, releaseClosedPanel } = require("./panel-life");
 
@@ -587,8 +587,7 @@ function noteGrowth(session) {
   }
   if (stat.size === session.size) return;
   const grew = stat.size > session.size;
-  session.size = stat.size;
-  session.mtime = stat.mtimeMs;
+  refreshSessionMeta(session);
   if (!grew) {
     postSessionsSoon();
     return;
@@ -634,8 +633,7 @@ function settleActivity(key) {
     return;
   }
   if (stat.size !== session.size) {
-    session.size = stat.size;
-    session.mtime = stat.mtimeMs;
+    refreshSessionMeta(session);
     if (follow?.filePath === session.filePath) scheduleLive();
     armActivityQuiet(key);
     postSessionsSoon();
