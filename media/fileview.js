@@ -91,13 +91,31 @@ bodyEl.addEventListener("keydown", (event) => {
 });
 const diagramEl = document.getElementById("diagram");
 const diagramStage = document.getElementById("diagram-stage");
-document.getElementById("diagram-close").addEventListener("click", closeDiagram);
+const diagramZoomReset = document.getElementById("diagram-zoom-reset");
+const diagramView = { scale: 1, x: 0, y: 0, canvas: null, drag: null };
+document.getElementById("diagram-close")?.addEventListener("click", closeDiagram);
+document.getElementById("diagram-zoom-in")?.addEventListener("click", () => zoomDiagramBy(1.25));
+document.getElementById("diagram-zoom-out")?.addEventListener("click", () => zoomDiagramBy(1 / 1.25));
+diagramZoomReset?.addEventListener("click", resetDiagramZoom);
+bindDiagramStage();
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
   if (!diagramEl.hidden) {
-    closeDiagram();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeDiagram();
+    } else if (event.key === "+" || event.key === "=") {
+      event.preventDefault();
+      zoomDiagramBy(1.25);
+    } else if (event.key === "-" || event.key === "_") {
+      event.preventDefault();
+      zoomDiagramBy(1 / 1.25);
+    } else if (event.key === "0") {
+      event.preventDefault();
+      resetDiagramZoom();
+    }
     return;
   }
+  if (event.key !== "Escape") return;
   hideMenu();
   hidePopover();
 });
@@ -408,7 +426,7 @@ function paintLegacy(root, comment) {
 
 function anchorable(node) {
   const el = node.parentElement;
-  return Boolean(el && docEl.contains(node) && !el.closest("button, .ln, .mermaid, script, style, code.language-mermaid"));
+  return Boolean(el && docEl.contains(node) && !el.closest("button, .ln, .mermaid, .table-chart, script, style, code.language-mermaid, code.language-svg"));
 }
 
 function firstAnchorText(root) {
@@ -516,6 +534,10 @@ function visibleChars(root) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   let node = walker.nextNode();
   while (node) {
+    if (!anchorable(node)) {
+      node = walker.nextNode();
+      continue;
+    }
     const text = node.nodeValue || "";
     for (let index = 0; index < text.length; index += 1) {
       if (/\s/.test(text[index])) continue;
@@ -553,7 +575,47 @@ function wrapChars(chars) {
 
 let diagramToken = 0;
 
+function attachZoomButton(host, getSvg) {
+  const zoom = document.createElement("button");
+  zoom.type = "button";
+  zoom.className = "mermaid-zoom";
+  zoom.textContent = "Full screen";
+  zoom.addEventListener("click", () => openDiagram(typeof getSvg === "function" ? getSvg() : getSvg));
+  const showZoom = (event) => {
+    const top = event.clientY - host.getBoundingClientRect().top;
+    zoom.classList.toggle("is-visible", top <= 44 || zoom.contains(event.target));
+  };
+  host.addEventListener("mousemove", showZoom);
+  host.addEventListener("mouseleave", () => zoom.classList.remove("is-visible"));
+  host.append(zoom);
+}
+
+function renderSvgBlocks(root) {
+  const blocks = [...root.querySelectorAll("pre > code.language-svg")];
+  for (const code of blocks) {
+    const pre = code.parentElement;
+    if (!pre || pre.dataset.svgRendered === "1") continue;
+    pre.dataset.svgRendered = "1";
+    const raw = (code.textContent || "").trim();
+    if (!raw.startsWith("<svg")) continue;
+    const safe = raw.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/\son\w+\s*=/gi, " data-noop=");
+    const host = document.createElement("div");
+    host.className = "mermaid";
+    host.innerHTML = safe;
+    const svg = host.querySelector("svg");
+    if (!svg) continue;
+    svg.removeAttribute("height");
+    svg.style.width = "100%";
+    svg.style.height = "auto";
+    svg.style.maxWidth = "none";
+    attachZoomButton(host, svg);
+    pre.replaceWith(host);
+  }
+}
+
 function renderDiagrams(root) {
+  renderSvgBlocks(root);
+  renderTableCharts(root);
   const token = ++diagramToken;
   if (!window.mermaid) return;
   const blocks = [...root.querySelectorAll("pre > code.language-mermaid")];
@@ -606,6 +668,84 @@ function renderDiagrams(root) {
   });
 }
 
+function applyDiagramTransform() {
+  if (diagramView.canvas) {
+    diagramView.canvas.style.transform = `translate(${diagramView.x}px, ${diagramView.y}px) scale(${diagramView.scale})`;
+  }
+  if (diagramZoomReset) {
+    diagramZoomReset.textContent = `${Math.round(diagramView.scale * 100)}%`;
+  }
+}
+
+function resetDiagramZoom() {
+  diagramView.scale = 1;
+  diagramView.x = 0;
+  diagramView.y = 0;
+  applyDiagramTransform();
+}
+
+function zoomDiagramAt(nextScale, clientX, clientY) {
+  if (!diagramStage) return;
+  const clamped = Math.min(8, Math.max(0.25, nextScale));
+  const prev = diagramView.scale;
+  if (Math.abs(clamped - prev) < 0.001) return;
+  const rect = diagramStage.getBoundingClientRect();
+  const cx = Number.isFinite(clientX) ? clientX - (rect.left + rect.width / 2) : 0;
+  const cy = Number.isFinite(clientY) ? clientY - (rect.top + rect.height / 2) : 0;
+  diagramView.x = cx - ((cx - diagramView.x) / prev) * clamped;
+  diagramView.y = cy - ((cy - diagramView.y) / prev) * clamped;
+  diagramView.scale = clamped;
+  applyDiagramTransform();
+}
+
+function zoomDiagramBy(factor) {
+  zoomDiagramAt(diagramView.scale * factor);
+}
+
+function bindDiagramStage() {
+  if (!diagramStage) return;
+  diagramStage.addEventListener("wheel", (event) => {
+    if (diagramEl.hidden) return;
+    event.preventDefault();
+    const factor = Math.exp(-event.deltaY * (event.ctrlKey ? 0.01 : 0.0025));
+    zoomDiagramAt(diagramView.scale * factor, event.clientX, event.clientY);
+  }, { passive: false });
+  diagramStage.addEventListener("dblclick", (event) => {
+    event.preventDefault();
+    if (Math.abs(diagramView.scale - 1) > 0.05 || Math.hypot(diagramView.x, diagramView.y) > 4) {
+      resetDiagramZoom();
+    } else {
+      zoomDiagramAt(2, event.clientX, event.clientY);
+    }
+  });
+  diagramStage.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    diagramView.drag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: diagramView.x,
+      originY: diagramView.y,
+    };
+    diagramStage.classList.add("dragging");
+    diagramStage.setPointerCapture(event.pointerId);
+  });
+  diagramStage.addEventListener("pointermove", (event) => {
+    const drag = diagramView.drag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    diagramView.x = drag.originX + (event.clientX - drag.startX);
+    diagramView.y = drag.originY + (event.clientY - drag.startY);
+    applyDiagramTransform();
+  });
+  const endDrag = (event) => {
+    if (!diagramView.drag || event.pointerId !== diagramView.drag.pointerId) return;
+    diagramView.drag = null;
+    diagramStage.classList.remove("dragging");
+  };
+  diagramStage.addEventListener("pointerup", endDrag);
+  diagramStage.addEventListener("pointercancel", endDrag);
+}
+
 function openDiagram(svg) {
   if (!svg) return;
   const copy = svg.cloneNode(true);
@@ -615,13 +755,166 @@ function openDiagram(svg) {
   copy.style.height = "100%";
   copy.style.maxWidth = "100%";
   copy.style.maxHeight = "100%";
-  diagramStage.replaceChildren(copy);
+  const canvas = document.createElement("div");
+  canvas.className = "diagram-canvas";
+  canvas.appendChild(copy);
+  diagramView.canvas = canvas;
+  diagramStage.replaceChildren(canvas);
+  resetDiagramZoom();
   diagramEl.hidden = false;
 }
 
 function closeDiagram() {
   diagramEl.hidden = true;
+  diagramView.canvas = null;
+  diagramView.drag = null;
+  diagramStage.classList.remove("dragging");
   diagramStage.replaceChildren();
+}
+
+let chartSeq = 0;
+
+function shortCategoryLabel(raw) {
+  const base = String(raw || "").replace(/\s*[（(].*$/, "").trim() || String(raw || "").trim();
+  return base.length > 18 ? `${base.slice(0, 16)}…` : base;
+}
+
+function parseMetricCell(cellEl) {
+  if (!cellEl || cellEl.querySelector("br")) return null;
+  const raw = (cellEl.textContent || "").trim();
+  const stripped = raw.replace(/\s*[（(][^）)]*[）)]\s*$/g, "").trim();
+  const match = /^([+-]?\d[\d,]*(?:\.\d+)?)\s*([%a-zA-Z\u4e00-\u9fa5/]{0,6})$/.exec(stripped);
+  if (!match) return null;
+  const value = Number(match[1].replace(/,/g, ""));
+  if (!Number.isFinite(value) || value < 0) return null;
+  const unit = match[2] ? (match[1].length + match[2].length === stripped.length ? match[2] : ` ${match[2]}`) : "";
+  return { value, unit, display: stripped };
+}
+
+function extractTableSeries(table) {
+  const allRows = [...table.querySelectorAll("tr")];
+  if (allRows.length < 4 || allRows.length > 25) return null;
+  const headers = [...allRows[0].querySelectorAll("th, td")].map((c) => (c.textContent || "").trim());
+  const bodyRows = allRows.slice(1).filter((tr) => tr.querySelector("td"));
+  if (headers.length < 2 || bodyRows.length < 3) return null;
+  const labels = bodyRows.map((tr) => shortCategoryLabel(tr.querySelector("td")?.textContent || ""));
+  const series = [];
+  for (let col = 1; col < headers.length; col += 1) {
+    const points = [];
+    let ok = true;
+    for (let r = 0; r < bodyRows.length; r += 1) {
+      const cells = bodyRows[r].querySelectorAll("td");
+      const parsed = parseMetricCell(cells[col]);
+      if (!parsed) {
+        ok = false;
+        break;
+      }
+      points.push({ label: labels[r], ...parsed });
+    }
+    if (!ok) continue;
+    const vals = points.map((p) => p.value);
+    const min = Math.min(...vals);
+    const max = Math.max(...vals);
+    if (!(max > min)) continue;
+    const title = headers[col].replace(/\s*[（(].*$/, "").trim() || headers[col];
+    series.push({ title, unit: points[0].unit, points, max });
+  }
+  return series.length ? series : null;
+}
+
+function renderTableCharts(root) {
+  const tables = [...root.querySelectorAll("table")];
+  for (const table of tables) {
+    if (table.dataset.chartRendered === "1") continue;
+    table.dataset.chartRendered = "1";
+    const seriesList = extractTableSeries(table);
+    if (!seriesList) continue;
+    const box = document.createElement("div");
+    box.className = "table-chart";
+    const head = document.createElement("div");
+    head.className = "table-chart-head";
+    const caption = document.createElement("div");
+    caption.className = "table-chart-caption";
+    head.appendChild(caption);
+    const stage = document.createElement("div");
+    stage.className = "table-chart-stage";
+    const selectSeries = (idx) => {
+      const s = seriesList[idx] || seriesList[0];
+      let peak = s.points[0];
+      for (const p of s.points) if (p.value > peak.value) peak = p;
+      caption.textContent = `${s.title} peaked at ${peak.display} in ${peak.label}`;
+      stage.innerHTML = buildTableChartSvg(s, ++chartSeq);
+    };
+    if (seriesList.length > 1) {
+      const tabs = document.createElement("div");
+      tabs.className = "table-chart-tabs";
+      seriesList.forEach((s, idx) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = `table-chart-tab${idx === 0 ? " active" : ""}`;
+        btn.textContent = s.title;
+        btn.addEventListener("click", () => {
+          [...tabs.children].forEach((c, i) => c.classList.toggle("active", i === idx));
+          selectSeries(idx);
+        });
+        tabs.appendChild(btn);
+      });
+      head.appendChild(tabs);
+    }
+    selectSeries(0);
+    attachZoomButton(box, () => stage.querySelector("svg"));
+    box.append(head, stage);
+    table.after(box);
+  }
+}
+
+function formatAxisTick(val, unit) {
+  if (val === 0) return `0${unit.trim()}`;
+  const num = val >= 100 ? Math.round(val).toLocaleString("en-US") : Number(val.toPrecision(3));
+  return `${num}${unit}`;
+}
+
+function buildTableChartSvg(series, seq) {
+  const W = 580;
+  const H = 195;
+  const padL = 56;
+  const padR = 54;
+  const padT = 26;
+  const padB = 30;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const topVal = (series.max || 1) * 1.1;
+  const pts = series.points.map((p, i) => {
+    const x = padL + (series.points.length === 1 ? plotW / 2 : (i / (series.points.length - 1)) * plotW);
+    const y = padT + plotH - (p.value / topVal) * plotH;
+    return { x, y, ...p };
+  });
+  let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
+  for (let i = 0; i < pts.length - 1; i += 1) {
+    const p0 = pts[i];
+    const p1 = pts[i + 1];
+    const cx = ((p0.x + p1.x) / 2).toFixed(1);
+    d += ` C ${cx} ${p0.y.toFixed(1)}, ${cx} ${p1.y.toFixed(1)}, ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`;
+  }
+  const areaD = `${d} L ${pts[pts.length - 1].x.toFixed(1)} ${(padT + plotH).toFixed(1)} L ${pts[0].x.toFixed(1)} ${(padT + plotH).toFixed(1)} Z`;
+  let peakIdx = 0;
+  for (let i = 1; i < pts.length; i += 1) if (pts[i].value > pts[peakIdx].value) peakIdx = i;
+  const grids = [];
+  for (let g = 0; g <= 4; g += 1) {
+    const ratio = g / 4;
+    const y = (padT + plotH - ratio * plotH).toFixed(1);
+    const label = formatAxisTick(topVal * ratio, series.unit);
+    grids.push(`<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="currentColor" stroke-opacity="0.12" stroke-width="1"/>`);
+    grids.push(`<text x="${padL - 8}" y="${(Number(y) + 3.5).toFixed(1)}" text-anchor="end" font-size="10" fill="currentColor" fill-opacity="0.55">${label}</text>`);
+  }
+  const xLabels = pts.map((p) => `<text x="${p.x.toFixed(1)}" y="${H - 8}" text-anchor="middle" font-size="10.5" fill="currentColor" fill-opacity="0.65">${p.label}</text>`).join("");
+  const dots = pts.map((p) => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" fill="#0d9488"/>`).join("");
+  const peak = pts[peakIdx];
+  const peakCallout = `<line x1="${peak.x.toFixed(1)}" y1="${(peak.y - 4).toFixed(1)}" x2="${peak.x.toFixed(1)}" y2="${(peak.y - 12).toFixed(1)}" stroke="currentColor" stroke-opacity="0.45" stroke-width="1"/><text x="${peak.x.toFixed(1)}" y="${(peak.y - 15).toFixed(1)}" text-anchor="middle" font-size="10.5" font-weight="700" fill="currentColor">peak ${peak.display}</text>`;
+  const last = pts[pts.length - 1];
+  const endLabel = peakIdx === pts.length - 1 ? "" : `<text x="${(last.x + 7).toFixed(1)}" y="${(last.y + 3.5).toFixed(1)}" text-anchor="start" font-size="10.5" font-weight="700" fill="#0d9488">${last.display}</text>`;
+  const gradId = `tcGrad_${seq}`;
+  return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#0d9488" stop-opacity="0.24"/><stop offset="100%" stop-color="#0d9488" stop-opacity="0.01"/></linearGradient></defs>${grids.join("")}<path d="${areaD}" fill="url(#${gradId})"/><path d="${d}" fill="none" stroke="#0d9488" stroke-width="2" stroke-linecap="round"/>${dots}${peakCallout}${endLabel}${xLabels}</svg>`;
 }
 
 function blockOf(node) {

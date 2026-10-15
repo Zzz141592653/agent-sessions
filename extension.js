@@ -1213,7 +1213,15 @@ function htmlFor(context, webview) {
   <div id="mascot-dock" class="mascot-dock"></div>
   <div id="mascot-menu" class="mascot-menu" hidden></div>
   <div id="diagram" hidden>
-    <button id="diagram-close" type="button">Close</button>
+    <div class="diagram-bar">
+      <span class="diagram-hint">Scroll to zoom · Drag to pan · Double-click to reset</span>
+      <div class="diagram-actions">
+        <button id="diagram-zoom-out" type="button" title="Zoom out (-)">−</button>
+        <button id="diagram-zoom-reset" type="button" title="Reset zoom (0)">100%</button>
+        <button id="diagram-zoom-in" type="button" title="Zoom in (+)">+</button>
+        <button id="diagram-close" type="button" title="Close (Esc)">Close</button>
+      </div>
+    </div>
     <div id="diagram-stage"></div>
   </div>
   ${mermaid}

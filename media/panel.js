@@ -26,11 +26,12 @@ const state = {
     mode: "auto",
     minimized: false,
     x: null,
-    y: null,
+    bottom: null,
     initialized: false,
     knownSessions: new Map(),
     displayedToday: { omp: 0, claude: 0 },
     toastStacks: { omp: null, claude: null },
+    cards: {},
   },
 };
 
@@ -53,7 +54,13 @@ const mascotDock = document.querySelector("#mascot-dock");
 const mascotMenu = document.querySelector("#mascot-menu");
 const diagramEl = document.querySelector("#diagram");
 const diagramStage = document.querySelector("#diagram-stage");
+const diagramZoomReset = document.querySelector("#diagram-zoom-reset");
+const diagramView = { scale: 1, x: 0, y: 0, canvas: null, drag: null };
 document.querySelector("#diagram-close")?.addEventListener("click", closeDiagram);
+document.querySelector("#diagram-zoom-in")?.addEventListener("click", () => zoomDiagramBy(1.25));
+document.querySelector("#diagram-zoom-out")?.addEventListener("click", () => zoomDiagramBy(1 / 1.25));
+diagramZoomReset?.addEventListener("click", resetDiagramZoom);
+bindDiagramStage();
 
 document.querySelector("#refresh").addEventListener("click", () => {
   vscode.postMessage({ type: "refresh" });
@@ -685,7 +692,10 @@ function highlightHits(root, query) {
   const marks = [];
   const nodes = [];
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  while (walker.nextNode()) nodes.push(walker.currentNode);
+  while (walker.nextNode()) {
+    const p = walker.currentNode.parentElement;
+    if (p && !p.closest("svg, .table-chart, button")) nodes.push(walker.currentNode);
+  }
   const needle = query.toLowerCase();
   for (const node of nodes) {
     const text = node.nodeValue;
@@ -922,9 +932,9 @@ function renderMarkdown(parent, text) {
       const firstNl = chunk.indexOf("\n");
       const lang = (firstNl >= 0 ? chunk.slice(0, firstNl) : "").trim().split(/\s+/)[0].toLowerCase();
       const body = (firstNl >= 0 ? chunk.slice(firstNl + 1) : chunk).replace(/\n$/, "");
-      if (lang === "mermaid") {
+      if (lang === "mermaid" || lang === "svg") {
         const pre = el("pre");
-        const code = el("code", "language-mermaid", body);
+        const code = el("code", `language-${lang}`, body);
         pre.append(code);
         parent.append(pre);
       } else {
@@ -951,7 +961,8 @@ function renderProse(parent, text) {
     }
     const heading = /^\s*(#{1,6})\s+(.*)$/.exec(lines[index]);
     if (heading) {
-      const node = el(heading[1].length > 1 ? "h4" : "h3");
+      const level = heading[1].length;
+      const node = el(level <= 2 ? "h2" : level === 3 ? "h3" : "h4");
       appendInline(node, heading[2]);
       parent.append(node);
       index += 1;
@@ -972,37 +983,8 @@ function renderProse(parent, text) {
       parent.append(quote);
       continue;
     }
-    if (isTopBulletLine(lines[index])) {
-      const list = el("ul", "md-list");
-      while (index < lines.length) {
-        while (index < lines.length && !lines[index].trim()) index += 1;
-        if (index >= lines.length || !isTopBulletLine(lines[index])) break;
-        const item = el("li");
-        appendInline(item, lines[index].replace(/^\s*[-*+]\s+/, ""));
-        index += 1;
-        index = consumeSubList(item, lines, index);
-        list.append(item);
-      }
-      parent.append(list);
-      continue;
-    }
-    const firstNum = /^\s*(\d+)\.\s+(.*)$/.exec(lines[index]);
-    if (firstNum) {
-      const list = el("ol", "md-list");
-      const startNum = Number(firstNum[1]);
-      if (startNum > 1) list.start = startNum;
-      while (index < lines.length) {
-        let look = index;
-        while (look < lines.length && !lines[look].trim()) look += 1;
-        const numMatch = look < lines.length ? /^\s*(\d+)\.\s+(.*)$/.exec(lines[look]) : null;
-        if (!numMatch) break;
-        index = look + 1;
-        const item = el("li");
-        appendInline(item, numMatch[2]);
-        index = consumeSubList(item, lines, index);
-        list.append(item);
-      }
-      parent.append(list);
+    if (parseListMarker(lines[index])) {
+      index = renderMdList(parent, lines, index, false);
       continue;
     }
     const paragraph = [];
@@ -1011,8 +993,7 @@ function renderProse(parent, text) {
       lines[index].trim() &&
       !isHrLine(lines[index]) &&
       !/^\s*(#{1,6})\s+/.test(lines[index]) &&
-      !isTopBulletLine(lines[index]) &&
-      !/^\s*\d+\.\s+/.test(lines[index]) &&
+      !parseListMarker(lines[index]) &&
       !isTableStart(lines, index) &&
       !isQuoteLine(lines[index])
     ) {
@@ -1032,47 +1013,94 @@ function isHrLine(line) {
   return /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line);
 }
 
-function isTopBulletLine(line) {
-  return /^\s{0,3}[-*+]\s+/.test(line) && !isHrLine(line);
+function parseListMarker(line) {
+  if (isHrLine(line)) return null;
+  const bullet = /^(\s*)([-*+])\s+(.*)$/.exec(line);
+  if (bullet) return { indent: bullet[1].length, type: "ul", num: null, text: bullet[3] };
+  const ordered = /^(\s*)(\d+)\.\s+(.*)$/.exec(line);
+  if (ordered) return { indent: ordered[1].length, type: "ol", num: Number(ordered[2]), text: ordered[3] };
+  return null;
 }
 
-function isSubBulletLine(line) {
-  return /^\s{1,}[-*+]\s+/.test(line) && !isHrLine(line);
+function isSpecialBlockLine(lines, idx) {
+  const line = lines[idx];
+  return isHrLine(line) || /^\s*(#{1,6})\s+/.test(line) || isTableStart(lines, idx);
 }
 
-function consumeSubList(parentLi, lines, startIndex) {
+function renderMdList(parent, lines, startIndex, isSub) {
+  const first = parseListMarker(lines[startIndex]);
+  if (!first) return startIndex + 1;
+  const baseIndent = first.indent;
+  const listType = first.type;
+  const list = el(listType, isSub ? "md-list sub-list" : "md-list");
+  if (listType === "ol" && first.num > 1) list.start = first.num;
   let index = startIndex;
-  let subList = null;
-  let lastSubLi = null;
   while (index < lines.length) {
-    if (!lines[index].trim()) {
-      let look = index + 1;
-      while (look < lines.length && !lines[look].trim()) look += 1;
-      if (look < lines.length && isSubBulletLine(lines[look])) {
-        index = look;
-      } else {
+    let look = index;
+    while (look < lines.length && !lines[look].trim()) look += 1;
+    if (look >= lines.length) break;
+    const m = parseListMarker(lines[look]);
+    if (!m || m.type !== listType || Math.abs(m.indent - baseIndent) > 1) break;
+    index = look + 1;
+    const item = el("li");
+    if (listType === "ol" && Number.isFinite(m.num)) item.value = m.num;
+    appendInline(item, m.text);
+    let lastText = m.text.trim();
+    let afterBlock = false;
+    while (index < lines.length) {
+      let nextIdx = index;
+      while (nextIdx < lines.length && !lines[nextIdx].trim()) nextIdx += 1;
+      if (nextIdx >= lines.length) break;
+      const cm = parseListMarker(lines[nextIdx]);
+      if (cm) {
+        if (cm.indent > baseIndent + 1) {
+          index = renderMdList(item, lines, nextIdx, true);
+          afterBlock = true;
+          continue;
+        }
         break;
       }
-    }
-    if (isSubBulletLine(lines[index])) {
-      if (!subList) {
-        subList = el("ul", "md-list sub-list");
-        parentLi.append(subList);
+      const qm = /^(\s*)>\s?(.*)$/.exec(lines[nextIdx]);
+      if (qm) {
+        if (qm[1].length > baseIndent + 1) {
+          const quote = el("blockquote");
+          const qLines = [];
+          while (nextIdx < lines.length) {
+            const ql = /^(\s*)>\s?(.*)$/.exec(lines[nextIdx]);
+            if (!ql || ql[1].length <= baseIndent + 1) break;
+            qLines.push(ql[2]);
+            nextIdx += 1;
+          }
+          renderProse(quote, qLines.join("\n"));
+          item.append(quote);
+          afterBlock = true;
+          index = nextIdx;
+          continue;
+        }
+        break;
       }
-      lastSubLi = el("li");
-      appendInline(lastSubLi, lines[index].replace(/^\s*[-*+]\s+/, ""));
-      subList.append(lastSubLi);
-      index += 1;
-      continue;
+      const indent = (lines[nextIdx].match(/^\s*/) || [""])[0].length;
+      if (indent > baseIndent + 1 && !isSpecialBlockLine(lines, nextIdx)) {
+        const cont = lines[nextIdx].trim();
+        if (afterBlock) {
+          const p = el("div");
+          appendInline(p, cont);
+          item.append(p);
+          afterBlock = false;
+        } else {
+          if (/[:：]$/.test(lastText)) item.append(document.createElement("br"));
+          else item.append(document.createTextNode(" "));
+          appendInline(item, cont);
+        }
+        lastText = cont;
+        index = nextIdx + 1;
+        continue;
+      }
+      break;
     }
-    if (lastSubLi && /^\s{2,}\S/.test(lines[index]) && !/^\s*\d+\.\s+/.test(lines[index])) {
-      lastSubLi.append(document.createTextNode(" "));
-      appendInline(lastSubLi, lines[index].trim());
-      index += 1;
-      continue;
-    }
-    break;
+    list.append(item);
   }
+  parent.append(list);
   return index;
 }
 
@@ -1154,7 +1182,7 @@ function formatMathInline(raw) {
 
 function appendInline(parent, rawText) {
   const text = formatMathInline(rawText);
-  const pattern = new RegExp("(<br\\s*\\/?>|`[^`\\n]+`|\\[[^\\[\\]\\n]+\\]\\([^)\\s]+\\)|\\*\\*[^*\\n]+\\*\\*|https?:\\/\\/[^\\s<>]+|file:\\/\\/[^\\s<>]+|" + ABSOLUTE_PATH + "|" + RELATIVE_PATH + ")", "gi");
+  const pattern = new RegExp("(<br\\s*\\/?>|`[^`\\n]+`|\\[[^\\[\\]\\n]+\\]\\([^)\\s]+\\)|\\*\\*(?:(?!\\*\\*)[^\\n])+\\*\\*|(?<!\\*)\\*[^*\\s\\n][^*\\n]*\\*(?!\\*)|https?:\\/\\/[^\\s<>]+|file:\\/\\/[^\\s<>]+|" + ABSOLUTE_PATH + "|" + RELATIVE_PATH + ")", "gi");
   let cursor = 0;
   for (const match of text.matchAll(pattern)) {
     if (match.index > cursor) parent.append(document.createTextNode(text.slice(cursor, match.index)));
@@ -1169,6 +1197,10 @@ function appendInline(parent, rawText) {
       const strong = el("strong");
       appendInline(strong, token.slice(2, -2));
       parent.append(strong);
+    } else if (token.startsWith("*")) {
+      const em = el("em");
+      appendInline(em, token.slice(1, -1));
+      parent.append(em);
     } else if (token.startsWith("[")) {
       const parsed = /^\[([^\[\]\n]+)\]\(([^)\s]+)\)$/.exec(token);
       const href = parsed && normalizeTarget(parsed[2]);
@@ -1349,7 +1381,11 @@ function applyMascotState(message) {
   if (typeof prefs.mode === "string") state.mascot.mode = prefs.mode;
   if (typeof prefs.minimized === "boolean") state.mascot.minimized = prefs.minimized;
   if (Number.isFinite(prefs.x)) state.mascot.x = prefs.x;
-  if (Number.isFinite(prefs.y)) state.mascot.y = prefs.y;
+  if (Number.isFinite(prefs.bottom)) {
+    state.mascot.bottom = prefs.bottom;
+  } else if (Number.isFinite(prefs.y)) {
+    state.mascot.bottom = Math.max(8, window.innerHeight - prefs.y - 140);
+  }
   renderMascots();
 }
 
@@ -1473,6 +1509,29 @@ function formatSpendAmount(amount) {
   return `$${n.toFixed(2)}`;
 }
 
+function ensureMascotCard(source) {
+  let refs = state.mascot.cards[source];
+  if (refs) return refs;
+  const label = source === "omp" ? "OMP" : "Claude";
+  const card = el("div", `mascot-card ${source}`);
+  const toastStack = ensureToastStack(source);
+  const bubble = el("div", "mascot-bubble");
+  const mainLine = el("div", "mascot-bubble-main");
+  const amtSpan = el("span", `amt ${source}`, "$0.00");
+  mainLine.append(document.createTextNode(`${label} Today `), amtSpan);
+  const subLine = el("div", "mascot-bubble-sub", "Month $0.00");
+  const statusEl = el("div", "mascot-status", "Idle");
+  bubble.append(toastStack, mainLine, subLine, statusEl);
+  const img = document.createElement("img");
+  img.className = "mascot-avatar";
+  img.alt = `${label} mascot`;
+  img.draggable = false;
+  card.append(bubble, img);
+  refs = { card, bubble, amtSpan, subLine, statusEl, img, currentSrc: "" };
+  state.mascot.cards[source] = refs;
+  return refs;
+}
+
 function renderMascots() {
   if (!mascotDock) return;
   const hasAnySrc = Boolean(state.mascot.ompSrc || state.mascot.claudeSrc);
@@ -1481,7 +1540,6 @@ function renderMascots() {
     return;
   }
   mascotDock.hidden = false;
-  mascotDock.replaceChildren();
   const spend = computeSpendSummary();
   const scopeLabel = state.scope === "workspace" ? "this workspace" : "all workspaces";
   if (state.mascot.minimized) {
@@ -1499,22 +1557,27 @@ function renderMascots() {
       saveMascotPrefs({ minimized: false });
       renderMascots();
     });
-    mascotDock.append(pill);
+    mascotDock.replaceChildren(pill);
     applyMascotPosition();
     return;
   }
-  const gear = el("button", "mascot-gear", "⚙");
-  gear.type = "button";
-  gear.title = "Customize mascot (or right-click)";
-  gear.addEventListener("click", (event) => {
-    event.stopPropagation();
-    const rect = gear.getBoundingClientRect();
-    openMascotMenu(rect.left, rect.top);
-  });
-  mascotDock.append(gear);
+  let gear = mascotDock.querySelector(":scope > .mascot-gear");
+  let row = mascotDock.querySelector(":scope > .mascot-row");
+  if (!gear || !row) {
+    gear = el("button", "mascot-gear", "⚙");
+    gear.type = "button";
+    gear.title = "Customize mascot (or right-click)";
+    gear.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const rect = gear.getBoundingClientRect();
+      openMascotMenu(rect.left, rect.top);
+    });
+    row = el("div", "mascot-row");
+    mascotDock.replaceChildren(gear, row);
+  }
   const sources = visibleMascotSources();
-  const row = el("div", "mascot-row");
   const selected = state.sessions.find((item) => item.key === state.selected);
+  const desiredCards = [];
   for (const source of sources) {
     const info = spend[source] || { today: 0, month: 0, count: 0, running: 0, fresh: 0 };
     const isBusy = info.running > 0 || Boolean(selected && selected.source === source && selected.activity === "running");
@@ -1523,36 +1586,37 @@ function renderMascots() {
     const src = isBusy ? thinkingSrc : idleSrc;
     if (!src) continue;
     const label = source === "omp" ? "OMP" : "Claude";
-    const card = el("div", `mascot-card ${source}`);
+    const refs = ensureMascotCard(source);
     const moodText = isBusy
       ? (info.running > 1 ? `Thinking (${info.running} running)` : "Thinking…")
       : "Idle";
-    card.title = `${label} · ${moodText} (${scopeLabel})\nToday: $${info.today.toFixed(4)}\nThis month: $${info.month.toFixed(4)}\nDrag to move · Right-click to customize`;
-    const toastStack = ensureToastStack(source);
-    const bubble = el("div", "mascot-bubble");
-    const mainLine = el("div", "mascot-bubble-main");
-    const amtSpan = el("span", `amt ${source}`, formatSpendAmount(info.today));
-    animateSpendValue(source, amtSpan, info.today);
-    mainLine.append(document.createTextNode(`${label} Today `), amtSpan);
-    const subLine = el("div", "mascot-bubble-sub", `Month ${formatSpendAmount(info.month)}`);
-    bubble.append(mainLine, subLine);
+    refs.card.title = `${label} · ${moodText} (${scopeLabel})\nToday: $${info.today.toFixed(4)}\nThis month: $${info.month.toFixed(4)}\nDrag to move · Right-click to customize`;
+    animateSpendValue(source, refs.amtSpan, info.today);
+    refs.subLine.textContent = `Month ${formatSpendAmount(info.month)}`;
     const statusParts = [];
     if (info.running > 1) statusParts.push(`Thinking · ${info.running} running`);
     else if (isBusy) statusParts.push("Thinking…");
     if (info.fresh > 0) statusParts.push(`${info.fresh} new ${info.fresh === 1 ? "reply" : "replies"}`);
     if (statusParts.length) {
-      const statusKind = isBusy ? "running" : "fresh";
-      bubble.append(el("div", `mascot-status ${statusKind}`, statusParts.join(" · ")));
+      refs.statusEl.className = `mascot-status ${isBusy ? "running" : "fresh"}`;
+      refs.statusEl.textContent = statusParts.join(" · ");
+    } else {
+      refs.statusEl.className = "mascot-status";
+      refs.statusEl.textContent = "Idle";
     }
-    const img = document.createElement("img");
-    img.className = "mascot-avatar";
-    img.src = src;
-    img.alt = `${label} mascot`;
-    img.draggable = false;
-    card.append(toastStack, bubble, img);
-    row.append(card);
+    if (refs.currentSrc !== src) {
+      refs.currentSrc = src;
+      refs.img.src = src;
+    }
+    desiredCards.push(refs.card);
   }
-  mascotDock.append(row);
+  const currentChildren = [...row.children];
+  if (
+    currentChildren.length !== desiredCards.length ||
+    currentChildren.some((node, idx) => node !== desiredCards[idx])
+  ) {
+    row.replaceChildren(...desiredCards);
+  }
   applyMascotPosition();
 }
 
@@ -1584,8 +1648,46 @@ function animateSpendValue(source, element, targetValue) {
 
 let diagramSeq = 0;
 
+function attachZoomButton(host, getSvg) {
+  const zoom = el("button", "mermaid-zoom", "Full screen");
+  zoom.type = "button";
+  zoom.addEventListener("click", () => openDiagram(typeof getSvg === "function" ? getSvg() : getSvg));
+  const showZoom = (event) => {
+    const top = event.clientY - host.getBoundingClientRect().top;
+    zoom.classList.toggle("is-visible", top <= 44 || zoom.contains(event.target));
+  };
+  host.addEventListener("mousemove", showZoom);
+  host.addEventListener("mouseleave", () => zoom.classList.remove("is-visible"));
+  host.append(zoom);
+}
+
+function renderSvgBlocks(root) {
+  const blocks = [...root.querySelectorAll("pre > code.language-svg")];
+  for (const code of blocks) {
+    const pre = code.parentElement;
+    if (!pre || pre.dataset.svgRendered === "1") continue;
+    pre.dataset.svgRendered = "1";
+    const raw = (code.textContent || "").trim();
+    if (!raw.startsWith("<svg")) continue;
+    const safe = raw.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/\son\w+\s*=/gi, " data-noop=");
+    const host = el("div", "mermaid");
+    host.innerHTML = safe;
+    const svg = host.querySelector("svg");
+    if (!svg) continue;
+    svg.removeAttribute("height");
+    svg.style.width = "100%";
+    svg.style.height = "auto";
+    svg.style.maxWidth = "none";
+    attachZoomButton(host, svg);
+    pre.replaceWith(host);
+  }
+}
+
 function renderDiagrams(root) {
-  if (!window.mermaid || !root) return;
+  if (!root) return;
+  renderSvgBlocks(root);
+  renderTableCharts(root);
+  if (!window.mermaid) return;
   const blocks = [...root.querySelectorAll("pre > code.language-mermaid")];
   if (!blocks.length) return;
   if (!renderDiagrams.ready) {
@@ -1636,6 +1738,238 @@ function renderDiagrams(root) {
   });
 }
 
+let chartSeq = 0;
+
+function shortCategoryLabel(raw) {
+  const base = String(raw || "").replace(/\s*[（(].*$/, "").trim() || String(raw || "").trim();
+  return base.length > 18 ? `${base.slice(0, 16)}…` : base;
+}
+
+function parseMetricCell(cellEl) {
+  if (!cellEl || cellEl.querySelector("br")) return null;
+  const raw = (cellEl.textContent || "").trim();
+  const stripped = raw.replace(/\s*[（(][^）)]*[）)]\s*$/g, "").trim();
+  const match = /^([+-]?\d[\d,]*(?:\.\d+)?)\s*([%a-zA-Z\u4e00-\u9fa5/]{0,6})$/.exec(stripped);
+  if (!match) return null;
+  const value = Number(match[1].replace(/,/g, ""));
+  if (!Number.isFinite(value) || value < 0) return null;
+  const unit = match[2] ? (match[1].length + match[2].length === stripped.length ? match[2] : ` ${match[2]}`) : "";
+  return { value, unit, display: stripped };
+}
+
+function extractTableSeries(table) {
+  const allRows = [...table.querySelectorAll("tr")];
+  if (allRows.length < 4 || allRows.length > 25) return null;
+  const headers = [...allRows[0].querySelectorAll("th, td")].map((c) => (c.textContent || "").trim());
+  const bodyRows = allRows.slice(1).filter((tr) => tr.querySelector("td"));
+  if (headers.length < 2 || bodyRows.length < 3) return null;
+  const labels = bodyRows.map((tr) => shortCategoryLabel(tr.querySelector("td")?.textContent || ""));
+  const series = [];
+  for (let col = 1; col < headers.length; col += 1) {
+    const points = [];
+    let ok = true;
+    for (let r = 0; r < bodyRows.length; r += 1) {
+      const cells = bodyRows[r].querySelectorAll("td");
+      const parsed = parseMetricCell(cells[col]);
+      if (!parsed) {
+        ok = false;
+        break;
+      }
+      points.push({ label: labels[r], ...parsed });
+    }
+    if (!ok) continue;
+    const vals = points.map((p) => p.value);
+    const min = Math.min(...vals);
+    const max = Math.max(...vals);
+    if (!(max > min)) continue;
+    const title = headers[col].replace(/\s*[（(].*$/, "").trim() || headers[col];
+    series.push({ title, unit: points[0].unit, points, max });
+  }
+  return series.length ? series : null;
+}
+
+function renderTableCharts(root) {
+  const tables = [...root.querySelectorAll("table")];
+  for (const table of tables) {
+    if (table.dataset.chartRendered === "1") continue;
+    table.dataset.chartRendered = "1";
+    const seriesList = extractTableSeries(table);
+    if (!seriesList) continue;
+    const box = el("div", "table-chart");
+    const head = el("div", "table-chart-head");
+    const caption = el("div", "table-chart-caption");
+    head.append(caption);
+    const stage = el("div", "table-chart-stage");
+    const selectSeries = (idx) => {
+      const s = seriesList[idx] || seriesList[0];
+      let peak = s.points[0];
+      for (const p of s.points) if (p.value > peak.value) peak = p;
+      caption.textContent = `${s.title} peaked at ${peak.display} in ${peak.label}`;
+      stage.innerHTML = buildTableChartSvg(s, ++chartSeq);
+    };
+    if (seriesList.length > 1) {
+      const tabs = el("div", "table-chart-tabs");
+      seriesList.forEach((s, idx) => {
+        const btn = el("button", `table-chart-tab${idx === 0 ? " active" : ""}`, s.title);
+        btn.type = "button";
+        btn.addEventListener("click", () => {
+          [...tabs.children].forEach((c, i) => c.classList.toggle("active", i === idx));
+          selectSeries(idx);
+        });
+        tabs.append(btn);
+      });
+      head.append(tabs);
+    }
+    selectSeries(0);
+    attachZoomButton(box, () => stage.querySelector("svg"));
+    box.append(head, stage);
+    table.after(box);
+  }
+}
+
+function formatAxisTick(val, unit) {
+  if (val === 0) return `0${unit.trim()}`;
+  const num = val >= 100 ? Math.round(val).toLocaleString("en-US") : Number(val.toPrecision(3));
+  return `${num}${unit}`;
+}
+
+function buildTableChartSvg(series, seq) {
+  const W = 580;
+  const H = 195;
+  const padL = 56;
+  const padR = 54;
+  const padT = 26;
+  const padB = 30;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const topVal = (series.max || 1) * 1.1;
+  const pts = series.points.map((p, i) => {
+    const x = padL + (series.points.length === 1 ? plotW / 2 : (i / (series.points.length - 1)) * plotW);
+    const y = padT + plotH - (p.value / topVal) * plotH;
+    return { x, y, ...p };
+  });
+  let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
+  for (let i = 0; i < pts.length - 1; i += 1) {
+    const p0 = pts[i];
+    const p1 = pts[i + 1];
+    const cx = ((p0.x + p1.x) / 2).toFixed(1);
+    d += ` C ${cx} ${p0.y.toFixed(1)}, ${cx} ${p1.y.toFixed(1)}, ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`;
+  }
+  const areaD = `${d} L ${pts[pts.length - 1].x.toFixed(1)} ${(padT + plotH).toFixed(1)} L ${pts[0].x.toFixed(1)} ${(padT + plotH).toFixed(1)} Z`;
+  let peakIdx = 0;
+  for (let i = 1; i < pts.length; i += 1) if (pts[i].value > pts[peakIdx].value) peakIdx = i;
+  const grids = [];
+  for (let g = 0; g <= 4; g += 1) {
+    const ratio = g / 4;
+    const y = (padT + plotH - ratio * plotH).toFixed(1);
+    const label = formatAxisTick(topVal * ratio, series.unit);
+    grids.push(`<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="currentColor" stroke-opacity="0.12" stroke-width="1"/>`);
+    grids.push(`<text x="${padL - 8}" y="${(Number(y) + 3.5).toFixed(1)}" text-anchor="end" font-size="10" fill="currentColor" fill-opacity="0.55">${label}</text>`);
+  }
+  const xLabels = pts.map((p) => `<text x="${p.x.toFixed(1)}" y="${H - 8}" text-anchor="middle" font-size="10.5" fill="currentColor" fill-opacity="0.65">${p.label}</text>`).join("");
+  const dots = pts.map((p) => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" fill="#0d9488"/>`).join("");
+  const peak = pts[peakIdx];
+  const peakCallout = `<line x1="${peak.x.toFixed(1)}" y1="${(peak.y - 4).toFixed(1)}" x2="${peak.x.toFixed(1)}" y2="${(peak.y - 12).toFixed(1)}" stroke="currentColor" stroke-opacity="0.45" stroke-width="1"/><text x="${peak.x.toFixed(1)}" y="${(peak.y - 15).toFixed(1)}" text-anchor="middle" font-size="10.5" font-weight="700" fill="currentColor">peak ${peak.display}</text>`;
+  const last = pts[pts.length - 1];
+  const endLabel = peakIdx === pts.length - 1 ? "" : `<text x="${(last.x + 7).toFixed(1)}" y="${(last.y + 3.5).toFixed(1)}" text-anchor="start" font-size="10.5" font-weight="700" fill="#0d9488">${last.display}</text>`;
+  const gradId = `tcGrad_${seq}`;
+  return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#0d9488" stop-opacity="0.24"/><stop offset="100%" stop-color="#0d9488" stop-opacity="0.01"/></linearGradient></defs>${grids.join("")}<path d="${areaD}" fill="url(#${gradId})"/><path d="${d}" fill="none" stroke="#0d9488" stroke-width="2" stroke-linecap="round"/>${dots}${peakCallout}${endLabel}${xLabels}</svg>`;
+}
+
+function applyDiagramTransform() {
+  if (diagramView.canvas) {
+    diagramView.canvas.style.transform = `translate(${diagramView.x}px, ${diagramView.y}px) scale(${diagramView.scale})`;
+  }
+  if (diagramZoomReset) {
+    diagramZoomReset.textContent = `${Math.round(diagramView.scale * 100)}%`;
+  }
+}
+
+function resetDiagramZoom() {
+  diagramView.scale = 1;
+  diagramView.x = 0;
+  diagramView.y = 0;
+  applyDiagramTransform();
+}
+
+function zoomDiagramAt(nextScale, clientX, clientY) {
+  if (!diagramStage) return;
+  const clamped = Math.min(8, Math.max(0.25, nextScale));
+  const prev = diagramView.scale;
+  if (Math.abs(clamped - prev) < 0.001) return;
+  const rect = diagramStage.getBoundingClientRect();
+  const cx = Number.isFinite(clientX) ? clientX - (rect.left + rect.width / 2) : 0;
+  const cy = Number.isFinite(clientY) ? clientY - (rect.top + rect.height / 2) : 0;
+  diagramView.x = cx - ((cx - diagramView.x) / prev) * clamped;
+  diagramView.y = cy - ((cy - diagramView.y) / prev) * clamped;
+  diagramView.scale = clamped;
+  applyDiagramTransform();
+}
+
+function zoomDiagramBy(factor) {
+  zoomDiagramAt(diagramView.scale * factor);
+}
+
+function bindDiagramStage() {
+  if (!diagramStage || !diagramEl) return;
+  diagramStage.addEventListener("wheel", (event) => {
+    if (diagramEl.hidden) return;
+    event.preventDefault();
+    const factor = Math.exp(-event.deltaY * (event.ctrlKey ? 0.01 : 0.0025));
+    zoomDiagramAt(diagramView.scale * factor, event.clientX, event.clientY);
+  }, { passive: false });
+  diagramStage.addEventListener("dblclick", (event) => {
+    event.preventDefault();
+    if (Math.abs(diagramView.scale - 1) > 0.05 || Math.hypot(diagramView.x, diagramView.y) > 4) {
+      resetDiagramZoom();
+    } else {
+      zoomDiagramAt(2, event.clientX, event.clientY);
+    }
+  });
+  diagramStage.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    diagramView.drag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: diagramView.x,
+      originY: diagramView.y,
+    };
+    diagramStage.classList.add("dragging");
+    diagramStage.setPointerCapture(event.pointerId);
+  });
+  diagramStage.addEventListener("pointermove", (event) => {
+    const drag = diagramView.drag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    diagramView.x = drag.originX + (event.clientX - drag.startX);
+    diagramView.y = drag.originY + (event.clientY - drag.startY);
+    applyDiagramTransform();
+  });
+  const endDrag = (event) => {
+    if (!diagramView.drag || event.pointerId !== diagramView.drag.pointerId) return;
+    diagramView.drag = null;
+    diagramStage.classList.remove("dragging");
+  };
+  diagramStage.addEventListener("pointerup", endDrag);
+  diagramStage.addEventListener("pointercancel", endDrag);
+  document.addEventListener("keydown", (event) => {
+    if (diagramEl.hidden) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeDiagram();
+    } else if (event.key === "+" || event.key === "=") {
+      event.preventDefault();
+      zoomDiagramBy(1.25);
+    } else if (event.key === "-" || event.key === "_") {
+      event.preventDefault();
+      zoomDiagramBy(1 / 1.25);
+    } else if (event.key === "0") {
+      event.preventDefault();
+      resetDiagramZoom();
+    }
+  });
+}
+
 function openDiagram(svg) {
   if (!svg || !diagramEl || !diagramStage) return;
   const copy = svg.cloneNode(true);
@@ -1645,19 +1979,26 @@ function openDiagram(svg) {
   copy.style.height = "100%";
   copy.style.maxWidth = "100%";
   copy.style.maxHeight = "100%";
-  diagramStage.replaceChildren(copy);
+  const canvas = el("div", "diagram-canvas");
+  canvas.append(copy);
+  diagramView.canvas = canvas;
+  diagramStage.replaceChildren(canvas);
+  resetDiagramZoom();
   diagramEl.hidden = false;
 }
 
 function closeDiagram() {
   if (!diagramEl || !diagramStage) return;
   diagramEl.hidden = true;
+  diagramView.canvas = null;
+  diagramView.drag = null;
+  diagramStage.classList.remove("dragging");
   diagramStage.replaceChildren();
 }
 
 function applyMascotPosition() {
   if (!mascotDock || mascotDock.hidden) return;
-  if (!Number.isFinite(state.mascot.x) || !Number.isFinite(state.mascot.y)) {
+  if (!Number.isFinite(state.mascot.x) || !Number.isFinite(state.mascot.bottom)) {
     mascotDock.style.left = "";
     mascotDock.style.top = "";
     mascotDock.style.right = "22px";
@@ -1667,13 +2008,13 @@ function applyMascotPosition() {
   const width = mascotDock.offsetWidth || 160;
   const height = mascotDock.offsetHeight || 140;
   const maxX = Math.max(8, window.innerWidth - width - 8);
-  const maxY = Math.max(8, window.innerHeight - height - 8);
+  const maxBottom = Math.max(8, window.innerHeight - height - 8);
   const clampedX = Math.min(Math.max(8, state.mascot.x), maxX);
-  const clampedY = Math.min(Math.max(8, state.mascot.y), maxY);
+  const clampedBottom = Math.min(Math.max(8, state.mascot.bottom), maxBottom);
   mascotDock.style.right = "auto";
-  mascotDock.style.bottom = "auto";
+  mascotDock.style.top = "auto";
   mascotDock.style.left = `${clampedX}px`;
-  mascotDock.style.top = `${clampedY}px`;
+  mascotDock.style.bottom = `${clampedBottom}px`;
 }
 
 function saveMascotPrefs(patch) {
@@ -1683,7 +2024,7 @@ function saveMascotPrefs(patch) {
       mode: state.mascot.mode,
       minimized: state.mascot.minimized,
       x: state.mascot.x,
-      y: state.mascot.y,
+      bottom: state.mascot.bottom,
       ...patch,
     },
   });
@@ -1773,7 +2114,7 @@ function bindMascotWidget() {
       startX: event.clientX,
       startY: event.clientY,
       originLeft: rect.left,
-      originTop: rect.top,
+      originBottom: window.innerHeight - rect.bottom,
       moved: false,
     };
     mascotDock.dataset.dragged = "0";
@@ -1788,7 +2129,7 @@ function bindMascotWidget() {
     mascotDock.dataset.dragged = "1";
     mascotDock.classList.add("dragging");
     state.mascot.x = Math.round(drag.originLeft + dx);
-    state.mascot.y = Math.round(drag.originTop + dy);
+    state.mascot.bottom = Math.round(drag.originBottom - dy);
     applyMascotPosition();
   });
   const finishDrag = (event) => {
@@ -1797,7 +2138,7 @@ function bindMascotWidget() {
     drag = null;
     mascotDock.classList.remove("dragging");
     if (moved) {
-      saveMascotPrefs({ x: state.mascot.x, y: state.mascot.y });
+      saveMascotPrefs({ x: state.mascot.x, bottom: state.mascot.bottom });
       setTimeout(() => {
         mascotDock.dataset.dragged = "0";
       }, 0);

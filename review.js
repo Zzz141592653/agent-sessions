@@ -486,23 +486,39 @@ function isMarkdown(file) {
   return /\.(md|markdown|mdx)$/i.test(file);
 }
 
+function formatMathInline(raw) {
+  return String(raw)
+    .replace(/\$\\(?:rightarrow|to)\$/g, "→")
+    .replace(/\$\\leftarrow\$/g, "←")
+    .replace(/\$\\leftrightarrow\$/g, "↔")
+    .replace(/\$\\Rightarrow\$/g, "⇒")
+    .replace(/\$\\Leftarrow\$/g, "⇐")
+    .replace(/\$\\Leftrightarrow\$/g, "⇔")
+    .replace(/\$\\(?:le|leq)\$/g, "≤")
+    .replace(/\$\\(?:ge|geq)\$/g, "≥")
+    .replace(/\$\\(?:ne|neq)\$/g, "≠")
+    .replace(/\$\\approx\$/g, "≈")
+    .replace(/\$\\times\$/g, "×")
+    .replace(/\$\\pm\$/g, "±");
+}
+
 function renderText(source) {
   return source.split("\n").map((line, index) => {
     const body = line.length ? escapeHtml(line) : " ";
-    return `<section class="block" data-start="${index}" data-end="${index + 1}"><span class="ln">${index + 1}</span><span class="src">${body}</span></section>`;
+    return `<section class="block line" data-start="${index}" data-end="${index + 1}"><span class="ln">${index + 1}</span><span class="src">${body}</span></section>`;
   }).join("");
 }
 
 function renderMarkdown(source) {
-  const tokens = md.parse(source, {});
+  const tokens = md.parse(formatMathInline(source), {});
   const parts = [];
   let buf = [];
   let map = null;
   const flush = () => {
     if (!buf.length) return;
-    const html = md.renderer.render(buf, md.options, {});
-    if (map) parts.push(`<section class="block" data-start="${map[0]}" data-end="${map[1]}">${html}</section>`);
-    else if (html.trim()) parts.push(`<section class="block">${html}</section>`);
+    const html = md.renderer.render(buf, md.options, {}).replace(/&lt;br\s*\/?&gt;/gi, "<br>");
+    if (map) parts.push(`<section class="block md-block" data-start="${map[0]}" data-end="${map[1]}">${html}</section>`);
+    else if (html.trim()) parts.push(`<section class="block md-block">${html}</section>`);
     buf = [];
     map = null;
   };
@@ -600,7 +616,15 @@ ${mermaid}
   </div>
 </div>
 <div id="diagram" hidden>
-  <button id="diagram-close" type="button">Close</button>
+  <div class="diagram-bar">
+    <span class="diagram-hint">Scroll to zoom · Drag to pan · Double-click to reset</span>
+    <div class="diagram-actions">
+      <button id="diagram-zoom-out" type="button" title="Zoom out (-)">−</button>
+      <button id="diagram-zoom-reset" type="button" title="Reset zoom (0)">100%</button>
+      <button id="diagram-zoom-in" type="button" title="Zoom in (+)">+</button>
+      <button id="diagram-close" type="button" title="Close (Esc)">Close</button>
+    </div>
+  </div>
   <div id="diagram-stage"></div>
 </div>
 <script nonce="${nonce}">${script}</script>

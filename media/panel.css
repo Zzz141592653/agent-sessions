@@ -85,19 +85,15 @@ input[type="search"] {
 }
 .source-tag.omp {
   color: var(--omp);
-  background: color-mix(in srgb, var(--omp) 16%, transparent);
+  background: color-mix(in srgb, var(--omp) 18%, var(--vscode-sideBar-background));
 }
 .source-tag.claude {
   color: var(--claude);
-  background: color-mix(in srgb, var(--claude) 16%, transparent);
+  background: color-mix(in srgb, var(--claude) 18%, var(--vscode-sideBar-background));
 }
 .source-tag.cursor {
   color: var(--cursor);
-  background: color-mix(in srgb, var(--cursor) 16%, transparent);
-}
-.session.selected .source-tag {
-  color: inherit;
-  background: rgba(255, 255, 255, 0.16);
+  background: color-mix(in srgb, var(--cursor) 18%, var(--vscode-sideBar-background));
 }
 .session {
   display: grid;
@@ -353,16 +349,78 @@ mark.hit.current { background: var(--vscode-editor-findMatchBackground, #f59e0b)
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.md { line-height: 1.62; }
 .md p { margin: 0 0 0.75em; }
 .md p:last-child { margin-bottom: 0; }
-.md h3, .md h4 { margin: 1.1em 0 0.4em; font-size: 15px; line-height: 1.35; }
-.md hr { border: 0; border-top: 1px solid var(--line); margin: 0.9em 0; }
-.md ul, .md ol { margin: 0.3em 0 0.8em; padding-left: 1.4em; }
-.md ul.sub-list, .md ol.sub-list { margin: 0.2em 0 0.35em; }
-.md li { margin: 0.2em 0; }
+.md h2 {
+  margin: 1.25em 0 0.5em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--line);
+  font-size: 16.5px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+.md h3 {
+  margin: 1.15em 0 0.45em;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.md h4 {
+  margin: 0.95em 0 0.35em;
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 1.25em 0; }
+.md ul, .md ol { margin: 0.4em 0 0.85em; padding-left: 1.5em; }
+.md ul.sub-list, .md ol.sub-list { margin: 0.22em 0 0.35em; }
+.md li { margin: 0.26em 0; line-height: 1.6; }
 .md pre.mermaid-error { outline: 1px solid var(--vscode-editorWarning-foreground, #f59e0b); }
-.md .mermaid { position: relative; margin: 8px 0 16px; }
+.md .mermaid { position: relative; margin: 10px 0 18px; }
 .md .mermaid svg { width: 100%; max-width: none; height: auto; display: block; }
+.md .table-chart {
+  position: relative;
+  margin: -4px 0 16px;
+  padding: 12px 14px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--vscode-foreground) 2%, transparent);
+}
+.table-chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.table-chart-caption {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--vscode-foreground);
+}
+.table-chart-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.table-chart-tab {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+}
+.table-chart-tab.active {
+  color: #0d9488;
+  border-color: color-mix(in srgb, #0d9488 55%, var(--line));
+  background: color-mix(in srgb, #0d9488 12%, transparent);
+  font-weight: 600;
+}
+.table-chart-stage { position: relative; }
+.table-chart-stage svg { width: 100%; max-width: 680px; height: auto; display: block; }
 .mermaid-zoom {
   position: absolute;
   top: 8px;
@@ -391,15 +449,59 @@ mark.hit.current { background: var(--vscode-editor-findMatchBackground, #f59e0b)
   background: var(--vscode-editor-background);
 }
 #diagram[hidden] { display: none !important; }
-#diagram-close {
-  align-self: flex-end;
+.diagram-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  z-index: 1;
+}
+.diagram-hint {
+  font-size: 11px;
+  color: var(--muted);
+  user-select: none;
+}
+.diagram-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.diagram-actions button {
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 4px 10px;
   background: var(--vscode-sideBar-background);
+  color: var(--vscode-foreground);
 }
-#diagram-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
-#diagram-stage svg { width: 100%; height: 100%; max-width: 100%; max-height: 100%; }
+.diagram-actions button:hover {
+  background: var(--soft);
+}
+#diagram-zoom-reset {
+  min-width: 54px;
+  font-variant-numeric: tabular-nums;
+}
+#diagram-stage {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  user-select: none;
+}
+#diagram-stage.dragging { cursor: grabbing; }
+.diagram-canvas {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform-origin: center center;
+  will-change: transform;
+}
+#diagram-stage svg { width: 100%; height: 100%; max-width: 100%; max-height: 100%; pointer-events: none; }
 .md blockquote {
   margin: 0.2em 0 0.9em;
   padding: 1px 0 1px 12px;
@@ -434,19 +536,22 @@ a.link {
 .md table {
   width: 100%;
   border-collapse: collapse;
-  margin: 0.6em 0 1em;
+  margin: 0.7em 0 1em;
   font-size: 13px;
+  font-variant-numeric: tabular-nums;
 }
 .md th, .md td {
   border: 1px solid var(--line);
-  padding: 7px 10px;
+  padding: 8px 11px;
   text-align: left;
   vertical-align: top;
+  min-width: 3.6em;
   overflow-wrap: break-word;
   word-break: normal;
 }
 .md th:first-child, .md td:first-child { min-width: 9.5em; }
 .md th { font-weight: 650; color: var(--muted); background: var(--soft); }
+.md tr:nth-child(even) td { background: color-mix(in srgb, var(--vscode-foreground) 2%, transparent); }
 .thinking { margin: 0 0 0.2em; }
 .thinking summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 .thinking .md {
@@ -557,12 +662,16 @@ a.link {
   transform: scale(1.08);
 }
 .mascot-toast-stack {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  margin-bottom: 5px;
   pointer-events: none;
+  z-index: 3;
 }
 .mascot-toast-stack:empty { display: none; }
 .spend-toast {

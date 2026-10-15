@@ -2,7 +2,7 @@
   "name": "agent-sessions",
   "displayName": "Agent Sessions",
   "description": "Browse OMP and Claude Code sessions. Files opened from a session use the comment view.",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "publisher": "jinxinyang",
   "license": "MIT",
   "engines": {
