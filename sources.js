@@ -112,10 +112,17 @@ function cachedHeader(filePath, seen, source, visit) {
   } catch {
     return null;
   }
+  const dayStart = currentDayStart();
   const cached = headerCache.get(filePath);
-  if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.meta;
+  if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+    if (cached.dayStart !== dayStart && cached.acc && !cached.acc.sidechain) {
+      cached.meta = finalizeMeta(cached.acc, stat);
+      cached.dayStart = dayStart;
+    }
+    return cached.meta;
+  }
   if (source === "claude" && isOmpMirror(filePath)) {
-    headerCache.set(filePath, { size: stat.size, mtimeMs: stat.mtimeMs, offset: stat.size, acc: null, meta: null });
+    headerCache.set(filePath, { size: stat.size, mtimeMs: stat.mtimeMs, offset: stat.size, dayStart, acc: null, meta: null });
     return null;
   }
   const prev = cached && cached.acc && stat.size > cached.offset ? cached : null;
@@ -126,6 +133,7 @@ function cachedHeader(filePath, seen, source, visit) {
     size: stat.size,
     mtimeMs: stat.mtimeMs,
     offset: scanned.offset,
+    dayStart,
     acc: scanned.acc,
     meta: stored,
   });
@@ -194,6 +202,7 @@ function createTranscriptReader(filePath, source) {
     filesStamp: -1,
     cachedFiles: [],
     cachedPatches: [],
+    mtime: 0,
     usage: createUsageState(),
   };
 }
@@ -205,6 +214,7 @@ function readTranscript(reader) {
   } catch {
     return reader;
   }
+  reader.mtime = stat.mtimeMs;
   if (stat.size < reader.offset) resetTranscript(reader);
   if (stat.size === reader.offset) return reader;
   const fd = fs.openSync(reader.filePath, "r");
@@ -369,7 +379,7 @@ function snapshotTranscript(reader) {
     omitted,
     files: reader.cachedFiles,
     patches: reader.cachedPatches,
-    stats: resolveStats(reader.usage),
+    stats: resolveStats(reader.usage, reader.mtime),
     turns: omitted ? turns.slice(turns.length - TURN_LIMIT) : turns.slice(),
   };
 }
@@ -558,6 +568,8 @@ function summary(source, filePath, meta, folders) {
     contextWindow: meta.contextWindow || 0,
     totalTokens: meta.totalTokens || 0,
     cost: meta.cost || 0,
+    todayCost: meta.todayCost || 0,
+    monthCost: meta.monthCost || 0,
     inWorkspace: belongsToWorkspace(cwd, folders),
     filePath,
   };
@@ -574,15 +586,17 @@ function createUsageState() {
     contextTokens: 0,
     totalTokens: 0,
     cost: 0,
+    turnCosts: [],
     msgTokens: null,
     msgSeq: 0,
     costStateTokens: 0,
     costStateUSD: 0,
+    costStateTs: 0,
   };
 }
 
 function finalizeMeta(acc, stat) {
-  const stats = resolveStats(acc);
+  const stats = resolveStats(acc, stat.mtimeMs);
   return {
     title: acc.title,
     preview: acc.preview,
@@ -662,6 +676,9 @@ function noteOmpUsage(acc, entry) {
   let turnCost = typeof u.cost?.total === "number" && u.cost.total > 0 ? u.cost.total : 0;
   if (!(turnCost > 0) && tok > 0) turnCost = estimateTurnCost(acc.model, inp, out, cr, cw);
   acc.cost = (acc.cost || 0) + turnCost;
+  if (turnCost > 0) {
+    acc.turnCosts.push({ ts: parseEntryTime(entry, msg), cost: turnCost });
+  }
 }
 
 function noteClaudeUsage(acc, entry) {
@@ -682,12 +699,17 @@ function noteClaudeUsage(acc, entry) {
     if (tok > 0) {
       if (!acc.msgTokens) acc.msgTokens = new Map();
       const id = msg.id || entry.uuid || `seq:${++acc.msgSeq}`;
-      acc.msgTokens.set(id, { model: acc.model, inp, out, cr, cw, tok });
+      const prev = acc.msgTokens.get(id);
+      const ts = parseEntryTime(entry, msg) || prev?.ts || 0;
+      acc.msgTokens.set(id, { model: acc.model, inp, out, cr, cw, tok, ts });
     }
     return;
   }
   if (entry.type === "cost-state") {
-    if (typeof entry.totalCostUSD === "number" && entry.totalCostUSD > 0) acc.costStateUSD = entry.totalCostUSD;
+    if (typeof entry.totalCostUSD === "number" && entry.totalCostUSD > 0) {
+      acc.costStateUSD = entry.totalCostUSD;
+      acc.costStateTs = parseEntryTime(entry) || acc.costStateTs || 0;
+    }
     let tot = 0;
     let bestModel = "";
     let bestTok = 0;
@@ -705,17 +727,67 @@ function noteClaudeUsage(acc, entry) {
   }
 }
 
-function resolveStats(acc) {
+function parseEntryTime(entry, msg) {
+  if (msg && typeof msg.timestamp === "number" && msg.timestamp > 0) return msg.timestamp;
+  if (typeof entry?.timestamp === "number" && entry.timestamp > 0) return entry.timestamp;
+  if (typeof entry?.timestamp === "string" && entry.timestamp) {
+    const parsed = Date.parse(entry.timestamp);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return 0;
+}
+
+function currentDayStart() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+}
+
+function currentMonthStart() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+}
+
+function resolveStats(acc, fallbackMtime) {
+  const dayStart = currentDayStart();
+  const monthStart = currentMonthStart();
+  const fallbackTs = fallbackMtime || 0;
   let msgTokSum = 0;
   let msgCostSum = 0;
-  if (acc.msgTokens) {
+  let todayWeight = 0;
+  let monthWeight = 0;
+  let totalWeight = 0;
+  if (acc.msgTokens && acc.msgTokens.size > 0) {
     for (const item of acc.msgTokens.values()) {
       msgTokSum += item.tok;
-      msgCostSum += estimateTurnCost(item.model || acc.model, item.inp, item.out, item.cr, item.cw);
+      const est = estimateTurnCost(item.model || acc.model, item.inp, item.out, item.cr, item.cw);
+      msgCostSum += est;
+      const weight = est > 0 ? est : item.tok;
+      const ts = item.ts || fallbackTs;
+      totalWeight += weight;
+      if (ts >= monthStart) monthWeight += weight;
+      if (ts >= dayStart) todayWeight += weight;
     }
   }
   const totalTokens = Math.max(acc.totalTokens || 0, acc.costStateTokens || 0, msgTokSum);
   const rawCost = acc.costStateUSD > 0 ? acc.costStateUSD : (acc.cost > 0 ? acc.cost : msgCostSum);
+  let todayCost = 0;
+  let monthCost = 0;
+  if (acc.turnCosts && acc.turnCosts.length > 0) {
+    for (const item of acc.turnCosts) {
+      const ts = item.ts || fallbackTs;
+      if (ts >= monthStart) monthCost += item.cost;
+      if (ts >= dayStart) todayCost += item.cost;
+    }
+  } else if (rawCost > 0) {
+    if (totalWeight > 0) {
+      todayCost = rawCost * (todayWeight / totalWeight);
+      monthCost = rawCost * (monthWeight / totalWeight);
+    } else {
+      const ts = acc.costStateTs || fallbackTs;
+      if (ts >= monthStart) monthCost = rawCost;
+      if (ts >= dayStart) todayCost = rawCost;
+    }
+  }
   const spec = lookupModelSpec(acc.model);
   return {
     model: acc.model || "",
@@ -723,6 +795,8 @@ function resolveStats(acc) {
     contextWindow: spec.contextWindow || 0,
     totalTokens,
     cost: rawCost > 0 ? Number(rawCost.toFixed(6)) : 0,
+    todayCost: todayCost > 0 ? Number(todayCost.toFixed(6)) : 0,
+    monthCost: monthCost > 0 ? Number(monthCost.toFixed(6)) : 0,
   };
 }
 

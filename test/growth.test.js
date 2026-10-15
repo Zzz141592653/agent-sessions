@@ -46,6 +46,9 @@ test("hasOmpProcess matches omp and custom omp-* binaries but not unrelated chil
 test("loadTranscript extracts model, context tokens, total tokens, and cost for omp and claude", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-sessions-test-"));
   try {
+    const now = new Date();
+    const todayNoon = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12, 0, 0).toISOString();
+    const yesterdayNoon = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 12, 0, 0).toISOString();
     const ompFile = path.join(dir, "omp.jsonl");
     fs.writeFileSync(
       ompFile,
@@ -53,6 +56,19 @@ test("loadTranscript extracts model, context tokens, total tokens, and cost for 
         JSON.stringify({ type: "model_change", model: "vertex-proxy/gemini-4-argon" }),
         JSON.stringify({
           type: "message",
+          timestamp: yesterdayNoon,
+          message: {
+            role: "assistant",
+            provider: "vertex-proxy",
+            model: "gemini-4-argon",
+            content: [{ type: "text", text: "yesterday" }],
+            usage: { input: 1000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 1100, cost: { total: 0.12 } },
+            contextSnapshot: { promptTokens: 1000 },
+          },
+        }),
+        JSON.stringify({
+          type: "message",
+          timestamp: todayNoon,
           message: {
             role: "assistant",
             provider: "vertex-proxy",
@@ -64,6 +80,7 @@ test("loadTranscript extracts model, context tokens, total tokens, and cost for 
         }),
         JSON.stringify({
           type: "message",
+          timestamp: todayNoon,
           message: {
             role: "assistant",
             content: [],
@@ -76,9 +93,9 @@ test("loadTranscript extracts model, context tokens, total tokens, and cost for 
     const ompTranscript = loadTranscript(ompFile, "omp");
     assert.equal(ompTranscript.stats.model, "vertex-proxy/gemini-4-argon");
     assert.equal(ompTranscript.stats.contextTokens, 5000);
-    assert.equal(ompTranscript.stats.totalTokens, 5200);
-    assert.equal(ompTranscript.stats.cost, 0.05);
-
+    assert.equal(ompTranscript.stats.totalTokens, 6300);
+    assert.equal(ompTranscript.stats.cost, 0.17);
+    assert.equal(ompTranscript.stats.todayCost, 0.05);
     const claudeFile = path.join(dir, "claude.jsonl");
     fs.writeFileSync(
       claudeFile,

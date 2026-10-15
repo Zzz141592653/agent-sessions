@@ -10,7 +10,7 @@ Opening each one to see whether it answered is the slow part. The list marks the
 
 The follow-up goes in the box at the bottom. When the OMP window is still open, Send pastes it there, so you can answer the session you are reading. Claude Code sessions can be read the same way. Under the reply, the files that turn changed are listed, and Diff opens the change in the panel before you answer.
 
-**This workspace** keeps the list to the repo you have open. Sessions from other directories show up under **All workspaces**.
+**This workspace** keeps the list to the repo you have open. Sessions from other directories show up under **All workspaces**. A draggable mascot widget in the corner shows **Today** and **Month** spend for OMP and Claude Code (right-click it to switch characters, pick a custom image, or minimize it).
 
 ## You want to mark one sentence, and then the agent rewrites the file
 

@@ -91,7 +91,10 @@ function openPanel(context, reveal) {
   webview.html = htmlFor(context, webview);
   webview.onDidReceiveMessage((message) => {
     if (message.type === "inputFocus") noteInputFocus(webview, message.focused === true);
-    if (message.type === "ready") postSessions();
+    if (message.type === "ready") {
+      postMascotState();
+      postSessions();
+    }
     if (message.type === "open") openSession(message.key);
     if (message.type === "refresh") {
       refresh();
@@ -103,6 +106,9 @@ function openPanel(context, reveal) {
     if (message.type === "hide") hideSession(message.key);
     if (message.type === "unhide") unhideSession(message.key);
     if (message.type === "deleteSession") deleteSession(message.key);
+    if (message.type === "pickMascotImage") void pickMascotImage(message.target);
+    if (message.type === "resetMascotImages") void resetMascotImages();
+    if (message.type === "saveMascotPrefs") void saveMascotPrefs(message.prefs);
   });
   panel.onDidDispose(() => {
     releaseClosedPanel(releaseLibrary, () => noteInputFocus(webview, false));
@@ -1058,6 +1064,80 @@ function isLocalPath(value) {
   return /\/[^/]+\.[A-Za-z0-9]{1,12}$/.test(pathOnly);
 }
 
+function mascotDataUrl(filePath) {
+  try {
+    const ext = path.extname(filePath).toLowerCase();
+    const mime =
+      ext === ".svg" ? "image/svg+xml"
+        : ext === ".webp" ? "image/webp"
+          : ext === ".gif" ? "image/gif"
+            : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg"
+              : "image/png";
+    const bytes = fs.readFileSync(filePath);
+    return `data:${mime};base64,${bytes.toString("base64")}`;
+  } catch {
+    return "";
+  }
+}
+
+function currentMascotState() {
+  const extPath = extensionContext ? extensionContext.extensionPath : __dirname;
+  const defaultOmp = mascotDataUrl(path.join(extPath, "media", "mascot-omp.png"));
+  const defaultClaude = mascotDataUrl(path.join(extPath, "media", "mascot-claude.png"));
+  const customOmp = extensionContext?.globalState.get("customMascotOmp") || "";
+  const customClaude = extensionContext?.globalState.get("customMascotClaude") || "";
+  const prefs = extensionContext?.globalState.get("mascotPrefs") || {};
+  return {
+    ompSrc: customOmp || defaultOmp,
+    claudeSrc: customClaude || defaultClaude,
+    hasCustom: Boolean(customOmp || customClaude),
+    prefs,
+  };
+}
+
+function postMascotState() {
+  if (!panel || !panelIsOpen(panel)) return;
+  panel.webview.postMessage({ type: "mascotState", ...currentMascotState() });
+}
+
+async function pickMascotImage(target) {
+  if (target !== "omp" && target !== "claude") return;
+  const picked = await vscode.window.showOpenDialog({
+    canSelectMany: false,
+    openLabel: `Use as ${target === "omp" ? "OMP" : "Claude"} Mascot`,
+    filters: { Images: ["png", "webp", "gif", "jpg", "jpeg", "svg"] },
+  });
+  if (!picked || !picked.length) return;
+  const filePath = picked[0].fsPath;
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    return;
+  }
+  if (stat.size > 4 * 1024 * 1024) {
+    void vscode.window.showWarningMessage("Mascot image must be 4 MB or smaller.");
+    return;
+  }
+  const dataUrl = mascotDataUrl(filePath);
+  if (!dataUrl) return;
+  const key = target === "omp" ? "customMascotOmp" : "customMascotClaude";
+  await extensionContext?.globalState.update(key, dataUrl);
+  postMascotState();
+}
+
+async function resetMascotImages() {
+  await extensionContext?.globalState.update("customMascotOmp", "");
+  await extensionContext?.globalState.update("customMascotClaude", "");
+  postMascotState();
+}
+
+async function saveMascotPrefs(prefs) {
+  if (!prefs || typeof prefs !== "object") return;
+  const prev = extensionContext?.globalState.get("mascotPrefs") || {};
+  await extensionContext?.globalState.update("mascotPrefs", { ...prev, ...prefs });
+}
+
 function htmlFor(context, webview) {
   const css = fs.readFileSync(path.join(context.extensionPath, "media", "panel.css"), "utf8");
   const script = fs.readFileSync(path.join(context.extensionPath, "media", "panel.js"), "utf8");
@@ -1066,7 +1146,7 @@ function htmlFor(context, webview) {
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: ${webview.cspSource}; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
   <style>${css}</style>
 </head>
 <body>
@@ -1124,6 +1204,8 @@ function htmlFor(context, webview) {
       </div>
     </form>
   </main>
+  <div id="mascot-dock" class="mascot-dock"></div>
+  <div id="mascot-menu" class="mascot-menu" hidden></div>
   <script nonce="${nonce}">${script}</script>
 </body>
 </html>`;

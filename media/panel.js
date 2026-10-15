@@ -17,6 +17,15 @@ const state = {
   diffMode: "split",
   diffData: null,
   showHidden: false,
+  mascot: {
+    ompSrc: "",
+    claudeSrc: "",
+    hasCustom: false,
+    mode: "auto",
+    minimized: false,
+    x: null,
+    y: null,
+  },
 };
 
 const listEl = document.querySelector("#list");
@@ -34,12 +43,15 @@ const replyForm = document.querySelector("#reply");
 const replyText = document.querySelector("#reply-text");
 const replyNotice = document.querySelector("#reply-notice");
 const replySend = document.querySelector("#reply-send");
+const mascotDock = document.querySelector("#mascot-dock");
+const mascotMenu = document.querySelector("#mascot-menu");
 
 document.querySelector("#refresh").addEventListener("click", () => {
   vscode.postMessage({ type: "refresh" });
 });
 
 bindInputSelectAll();
+bindMascotWidget();
 
 searchEl.addEventListener("input", () => {
   state.query = searchEl.value.trim().toLowerCase();
@@ -93,6 +105,10 @@ window.addEventListener("message", (event) => {
   if (!message) return;
   if (message.type === "selectAll") {
     selectFocusedField();
+    return;
+  }
+  if (message.type === "mascotState") {
+    applyMascotState(message);
     return;
   }
   if (message.type === "sessions") {
@@ -285,6 +301,7 @@ function renderList() {
   visible.sort((a, b) => b.mtime - a.mtime);
   hidden.sort((a, b) => b.mtime - a.mtime);
   renderAttention(shown);
+  renderMascots();
   listEl.replaceChildren();
   if (!visible.length) listEl.append(el("div", "empty", emptyLabel()));
   else appendSessions(visible);
@@ -424,7 +441,9 @@ function syncSessionStats(key, stats) {
     session.model !== stats.model ||
     session.contextTokens !== stats.contextTokens ||
     session.totalTokens !== stats.totalTokens ||
-    session.cost !== stats.cost;
+    session.cost !== stats.cost ||
+    session.todayCost !== stats.todayCost ||
+    session.monthCost !== stats.monthCost;
   Object.assign(session, stats);
   return changed;
 }
@@ -1201,4 +1220,277 @@ function when(mtime) {
   if (delta < day) return `${Math.floor(delta / hour)}h ago`;
   if (delta < 7 * day) return `${Math.floor(delta / day)}d ago`;
   return new Date(mtime).toLocaleDateString();
+}
+
+function applyMascotState(message) {
+  const prefs = message.prefs || {};
+  state.mascot.ompSrc = message.ompSrc || state.mascot.ompSrc;
+  state.mascot.claudeSrc = message.claudeSrc || state.mascot.claudeSrc;
+  state.mascot.hasCustom = message.hasCustom === true;
+  if (typeof prefs.mode === "string") state.mascot.mode = prefs.mode;
+  if (typeof prefs.minimized === "boolean") state.mascot.minimized = prefs.minimized;
+  if (Number.isFinite(prefs.x)) state.mascot.x = prefs.x;
+  if (Number.isFinite(prefs.y)) state.mascot.y = prefs.y;
+  renderMascots();
+}
+
+function computeSpendSummary() {
+  const pool = state.scope === "workspace"
+    ? state.sessions.filter((item) => item.inWorkspace)
+    : state.sessions;
+  const summary = {
+    omp: { today: 0, month: 0, count: 0 },
+    claude: { today: 0, month: 0, count: 0 },
+  };
+  for (const session of pool) {
+    const bucket = summary[session.source];
+    if (!bucket) continue;
+    bucket.today += Number(session.todayCost) || 0;
+    bucket.month += Number(session.monthCost) || 0;
+    bucket.count += 1;
+  }
+  return summary;
+}
+
+function visibleMascotSources() {
+  const mode = state.mascot.mode || "auto";
+  if (mode === "omp") return ["omp"];
+  if (mode === "claude") return ["claude"];
+  if (mode === "both") return ["omp", "claude"];
+  if (state.source === "omp") return ["omp"];
+  if (state.source === "claude") return ["claude"];
+  return ["omp", "claude"];
+}
+
+function formatSpendAmount(amount) {
+  const n = Number(amount) || 0;
+  if (n <= 0) return "$0.00";
+  if (n < 0.01) return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(2)}`;
+}
+
+function renderMascots() {
+  if (!mascotDock) return;
+  const hasAnySrc = Boolean(state.mascot.ompSrc || state.mascot.claudeSrc);
+  if (!hasAnySrc) {
+    mascotDock.hidden = true;
+    return;
+  }
+  mascotDock.hidden = false;
+  mascotDock.replaceChildren();
+  const spend = computeSpendSummary();
+  const scopeLabel = state.scope === "workspace" ? "this workspace" : "all workspaces";
+  if (state.mascot.minimized) {
+    const totalToday = spend.omp.today + spend.claude.today;
+    const pill = el("button", "mascot-pill");
+    pill.type = "button";
+    pill.title = `Click to expand · Right-click to customize (${scopeLabel})`;
+    pill.append(
+      document.createTextNode("Today "),
+      el("span", "amt omp", formatSpendAmount(totalToday)),
+    );
+    pill.addEventListener("click", () => {
+      if (mascotDock.dataset.dragged === "1") return;
+      state.mascot.minimized = false;
+      saveMascotPrefs({ minimized: false });
+      renderMascots();
+    });
+    mascotDock.append(pill);
+    applyMascotPosition();
+    return;
+  }
+  const gear = el("button", "mascot-gear", "⚙");
+  gear.type = "button";
+  gear.title = "Customize mascot (or right-click)";
+  gear.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const rect = gear.getBoundingClientRect();
+    openMascotMenu(rect.left, rect.top);
+  });
+  mascotDock.append(gear);
+  const sources = visibleMascotSources();
+  const row = el("div", "mascot-row");
+  for (const source of sources) {
+    const src = source === "omp" ? state.mascot.ompSrc : state.mascot.claudeSrc;
+    if (!src) continue;
+    const info = spend[source] || { today: 0, month: 0, count: 0 };
+    const label = source === "omp" ? "OMP" : "Claude";
+    const card = el("div", `mascot-card ${source}`);
+    card.title = `${label} (${scopeLabel})\nToday: $${info.today.toFixed(4)}\nThis month: $${info.month.toFixed(4)}\nDrag to move · Right-click to customize`;
+    const bubble = el("div", "mascot-bubble");
+    const mainLine = el("div", "mascot-bubble-main");
+    mainLine.append(
+      document.createTextNode(`${label} Today `),
+      el("span", `amt ${source}`, formatSpendAmount(info.today)),
+    );
+    const subLine = el("div", "mascot-bubble-sub", `Month ${formatSpendAmount(info.month)}`);
+    bubble.append(mainLine, subLine);
+    const img = document.createElement("img");
+    img.className = "mascot-avatar";
+    img.src = src;
+    img.alt = `${label} mascot`;
+    img.draggable = false;
+    card.append(bubble, img);
+    row.append(card);
+  }
+  mascotDock.append(row);
+  applyMascotPosition();
+}
+
+function applyMascotPosition() {
+  if (!mascotDock || mascotDock.hidden) return;
+  if (!Number.isFinite(state.mascot.x) || !Number.isFinite(state.mascot.y)) {
+    mascotDock.style.left = "";
+    mascotDock.style.top = "";
+    mascotDock.style.right = "22px";
+    mascotDock.style.bottom = "92px";
+    return;
+  }
+  const width = mascotDock.offsetWidth || 160;
+  const height = mascotDock.offsetHeight || 140;
+  const maxX = Math.max(8, window.innerWidth - width - 8);
+  const maxY = Math.max(8, window.innerHeight - height - 8);
+  const clampedX = Math.min(Math.max(8, state.mascot.x), maxX);
+  const clampedY = Math.min(Math.max(8, state.mascot.y), maxY);
+  mascotDock.style.right = "auto";
+  mascotDock.style.bottom = "auto";
+  mascotDock.style.left = `${clampedX}px`;
+  mascotDock.style.top = `${clampedY}px`;
+}
+
+function saveMascotPrefs(patch) {
+  vscode.postMessage({
+    type: "saveMascotPrefs",
+    prefs: {
+      mode: state.mascot.mode,
+      minimized: state.mascot.minimized,
+      x: state.mascot.x,
+      y: state.mascot.y,
+      ...patch,
+    },
+  });
+}
+
+function openMascotMenu(clientX, clientY) {
+  if (!mascotMenu) return;
+  mascotMenu.replaceChildren();
+  const modes = [
+    { id: "auto", label: "Show: Auto (follow filter)" },
+    { id: "both", label: "Show: Both (OMP & Claude)" },
+    { id: "claude", label: "Show: Claude-tan only" },
+    { id: "omp", label: "Show: OMP-tan only" },
+  ];
+  for (const item of modes) {
+    const btn = el("button", `mascot-menu-item${state.mascot.mode === item.id ? " active" : ""}`, item.label);
+    btn.type = "button";
+    btn.addEventListener("click", () => {
+      state.mascot.mode = item.id;
+      state.mascot.minimized = false;
+      saveMascotPrefs({ mode: item.id, minimized: false });
+      closeMascotMenu();
+      renderMascots();
+    });
+    mascotMenu.append(btn);
+  }
+  mascotMenu.append(el("div", "mascot-menu-sep"));
+  const pickClaude = el("button", "mascot-menu-item", "Custom Claude image…");
+  pickClaude.type = "button";
+  pickClaude.addEventListener("click", () => {
+    closeMascotMenu();
+    vscode.postMessage({ type: "pickMascotImage", target: "claude" });
+  });
+  const pickOmp = el("button", "mascot-menu-item", "Custom OMP image…");
+  pickOmp.type = "button";
+  pickOmp.addEventListener("click", () => {
+    closeMascotMenu();
+    vscode.postMessage({ type: "pickMascotImage", target: "omp" });
+  });
+  mascotMenu.append(pickClaude, pickOmp);
+  if (state.mascot.hasCustom) {
+    const resetBtn = el("button", "mascot-menu-item", "Reset default images");
+    resetBtn.type = "button";
+    resetBtn.addEventListener("click", () => {
+      closeMascotMenu();
+      vscode.postMessage({ type: "resetMascotImages" });
+    });
+    mascotMenu.append(resetBtn);
+  }
+  mascotMenu.append(el("div", "mascot-menu-sep"));
+  const minLabel = state.mascot.minimized ? "Expand mascot" : "Minimize to pill";
+  const minBtn = el("button", "mascot-menu-item", minLabel);
+  minBtn.type = "button";
+  minBtn.addEventListener("click", () => {
+    state.mascot.minimized = !state.mascot.minimized;
+    saveMascotPrefs({ minimized: state.mascot.minimized });
+    closeMascotMenu();
+    renderMascots();
+  });
+  mascotMenu.append(minBtn);
+  mascotMenu.hidden = false;
+  const width = mascotMenu.offsetWidth || 190;
+  const height = mascotMenu.offsetHeight || 180;
+  const left = Math.min(Math.max(8, clientX - width + 24), Math.max(8, window.innerWidth - width - 8));
+  const top = Math.min(Math.max(8, clientY - height - 6), Math.max(8, window.innerHeight - height - 8));
+  mascotMenu.style.left = `${left}px`;
+  mascotMenu.style.top = `${top}px`;
+}
+
+function closeMascotMenu() {
+  if (mascotMenu) mascotMenu.hidden = true;
+}
+
+function bindMascotWidget() {
+  if (!mascotDock) return;
+  let drag = null;
+  mascotDock.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    openMascotMenu(event.clientX, event.clientY);
+  });
+  mascotDock.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || event.target.closest(".mascot-gear")) return;
+    closeMascotMenu();
+    const rect = mascotDock.getBoundingClientRect();
+    drag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originLeft: rect.left,
+      originTop: rect.top,
+      moved: false,
+    };
+    mascotDock.dataset.dragged = "0";
+    mascotDock.setPointerCapture(event.pointerId);
+  });
+  mascotDock.addEventListener("pointermove", (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+    drag.moved = true;
+    mascotDock.dataset.dragged = "1";
+    mascotDock.classList.add("dragging");
+    state.mascot.x = Math.round(drag.originLeft + dx);
+    state.mascot.y = Math.round(drag.originTop + dy);
+    applyMascotPosition();
+  });
+  const finishDrag = (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const moved = drag.moved;
+    drag = null;
+    mascotDock.classList.remove("dragging");
+    if (moved) {
+      saveMascotPrefs({ x: state.mascot.x, y: state.mascot.y });
+      setTimeout(() => {
+        mascotDock.dataset.dragged = "0";
+      }, 0);
+    }
+  };
+  mascotDock.addEventListener("pointerup", finishDrag);
+  mascotDock.addEventListener("pointercancel", finishDrag);
+  window.addEventListener("resize", () => applyMascotPosition());
+  document.addEventListener("mousedown", (event) => {
+    if (mascotMenu && !mascotMenu.hidden && !mascotMenu.contains(event.target) && !event.target.closest(".mascot-gear")) {
+      closeMascotMenu();
+    }
+  });
 }
