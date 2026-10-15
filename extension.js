@@ -1081,13 +1081,17 @@ function mascotDataUrl(filePath) {
 function currentMascotState() {
   const extPath = extensionContext ? extensionContext.extensionPath : __dirname;
   const defaultOmp = mascotDataUrl(path.join(extPath, "media", "mascot-omp.png"));
+  const defaultOmpIdle = mascotDataUrl(path.join(extPath, "media", "mascot-omp-idle.png"));
   const defaultClaude = mascotDataUrl(path.join(extPath, "media", "mascot-claude.png"));
+  const defaultClaudeIdle = mascotDataUrl(path.join(extPath, "media", "mascot-claude-idle.png"));
   const customOmp = extensionContext?.globalState.get("customMascotOmp") || "";
   const customClaude = extensionContext?.globalState.get("customMascotClaude") || "";
   const prefs = extensionContext?.globalState.get("mascotPrefs") || {};
   return {
     ompSrc: customOmp || defaultOmp,
+    ompIdleSrc: customOmp || defaultOmpIdle || defaultOmp,
     claudeSrc: customClaude || defaultClaude,
+    claudeIdleSrc: customClaude || defaultClaudeIdle || defaultClaude,
     hasCustom: Boolean(customOmp || customClaude),
     prefs,
   };
@@ -1140,8 +1144,12 @@ function htmlFor(context, webview) {
   const css = fs.readFileSync(path.join(context.extensionPath, "media", "panel.css"), "utf8");
   const script = fs.readFileSync(path.join(context.extensionPath, "media", "panel.js"), "utf8");
   const nonce = String(Date.now());
+  const mermaidFile = path.join(context.extensionPath, "media", "mermaid.min.js");
+  const mermaidSrc = fs.existsSync(mermaidFile)
+    ? String(webview.asWebviewUri(vscode.Uri.file(mermaidFile))).replace(/&/g, "&amp;").replace(/"/g, "&quot;")
+    : "";
+  const mermaid = mermaidSrc ? `<script nonce="${nonce}" src="${mermaidSrc}"></script>` : "";
   return `<!DOCTYPE html>
-<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: ${webview.cspSource}; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';" />
@@ -1204,8 +1212,12 @@ function htmlFor(context, webview) {
   </main>
   <div id="mascot-dock" class="mascot-dock"></div>
   <div id="mascot-menu" class="mascot-menu" hidden></div>
+  <div id="diagram" hidden>
+    <button id="diagram-close" type="button">Close</button>
+    <div id="diagram-stage"></div>
+  </div>
+  ${mermaid}
   <script nonce="${nonce}">${script}</script>
-</body>
 </html>`;
 }
 

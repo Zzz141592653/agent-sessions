@@ -2,7 +2,8 @@
 
 Since 1.4.1.
 
-- Add a draggable floating mascot widget (OMP-tan and Claude-tan, with custom image support) showing each source's Today and current Month spend.
+- Add a draggable floating mascot widget (OMP-tan and Claude-tan with thinking/idle expressions, multi-session status, `↑$xxx` spend pop-ups, and custom image support) showing each source's Today and current Month spend.
+- Render Mermaid diagrams in chat messages (with full-screen zoom), and fix markdown rendering for nested `**bold `code`**`, `####` headings, ordered lists with sub-bullets, and LaTeX arrows (`$\rightarrow$`).
 - Sort all sessions together by time instead of splitting them into separate OMP and Claude Code sections, with a compact source tag (`OMP` / `Claude`) on each row.
 - Recognize custom `omp-*` binaries (such as `omp-gemini-test`) and path-invoked `omp` commands when checking whether a session's terminal window is open.
 - Show each session's current model, context window usage, total tokens, and estimated cost in the session list and thread header.

@@ -19,12 +19,19 @@ const state = {
   showHidden: false,
   mascot: {
     ompSrc: "",
+    ompIdleSrc: "",
     claudeSrc: "",
+    claudeIdleSrc: "",
     hasCustom: false,
     mode: "auto",
     minimized: false,
     x: null,
     y: null,
+    prevSpend: { omp: null, claude: null },
+    deltas: {
+      omp: { amount: 0, timer: 0 },
+      claude: { amount: 0, timer: 0 },
+    },
   },
 };
 
@@ -45,6 +52,9 @@ const replyNotice = document.querySelector("#reply-notice");
 const replySend = document.querySelector("#reply-send");
 const mascotDock = document.querySelector("#mascot-dock");
 const mascotMenu = document.querySelector("#mascot-menu");
+const diagramEl = document.querySelector("#diagram");
+const diagramStage = document.querySelector("#diagram-stage");
+document.querySelector("#diagram-close")?.addEventListener("click", closeDiagram);
 
 document.querySelector("#refresh").addEventListener("click", () => {
   vscode.postMessage({ type: "refresh" });
@@ -542,6 +552,7 @@ function renderThread(mode) {
   [...threadEl.querySelectorAll("details.tool")].forEach((node, index) => {
     if (openTools[index]) node.open = true;
   });
+  renderDiagrams(column);
   const marks = highlightHits(column, state.find.trim());
   const pinToEnd = () => {
     threadEl.scrollTop = threadEl.scrollHeight;
@@ -654,6 +665,7 @@ function patchThread(message) {
   const empty = column.querySelector(":scope > .empty");
   if (state.transcript.turns.length) empty?.remove();
   else if (!empty) column.append(el("div", "empty", "This session has no messages to show."));
+  renderDiagrams(column);
   if (nearBottom) {
     const pinToEnd = () => {
       threadEl.scrollTop = threadEl.scrollHeight;
@@ -907,8 +919,17 @@ function renderMarkdown(parent, text) {
   for (let index = 0; index < chunks.length; index += 1) {
     const chunk = chunks[index];
     if (index % 2 === 1) {
-      const body = chunk.replace(/^[^\n]*\n/, "");
-      parent.append(richPre(body.replace(/\n$/, "")));
+      const firstNl = chunk.indexOf("\n");
+      const lang = (firstNl >= 0 ? chunk.slice(0, firstNl) : "").trim().split(/\s+/)[0].toLowerCase();
+      const body = (firstNl >= 0 ? chunk.slice(firstNl + 1) : chunk).replace(/\n$/, "");
+      if (lang === "mermaid") {
+        const pre = el("pre");
+        const code = el("code", "language-mermaid", body);
+        pre.append(code);
+        parent.append(pre);
+      } else {
+        parent.append(richPre(body));
+      }
       continue;
     }
     renderProse(parent, chunk);
@@ -923,7 +944,12 @@ function renderProse(parent, text) {
       index += 1;
       continue;
     }
-    const heading = /^(#{1,3})\s+(.*)$/.exec(lines[index]);
+    if (isHrLine(lines[index])) {
+      parent.append(el("hr"));
+      index += 1;
+      continue;
+    }
+    const heading = /^\s*(#{1,6})\s+(.*)$/.exec(lines[index]);
     if (heading) {
       const node = el(heading[1].length > 1 ? "h4" : "h3");
       appendInline(node, heading[2]);
@@ -946,30 +972,50 @@ function renderProse(parent, text) {
       parent.append(quote);
       continue;
     }
-    if (/^[-*]\s+/.test(lines[index])) {
+    if (isTopBulletLine(lines[index])) {
       const list = el("ul", "md-list");
-      while (index < lines.length && /^[-*]\s+/.test(lines[index])) {
+      while (index < lines.length) {
+        while (index < lines.length && !lines[index].trim()) index += 1;
+        if (index >= lines.length || !isTopBulletLine(lines[index])) break;
         const item = el("li");
-        appendInline(item, lines[index].replace(/^[-*]\s+/, ""));
-        list.append(item);
+        appendInline(item, lines[index].replace(/^\s*[-*+]\s+/, ""));
         index += 1;
+        index = consumeSubList(item, lines, index);
+        list.append(item);
       }
       parent.append(list);
       continue;
     }
-    if (/^\d+\.\s+/.test(lines[index])) {
+    const firstNum = /^\s*(\d+)\.\s+(.*)$/.exec(lines[index]);
+    if (firstNum) {
       const list = el("ol", "md-list");
-      while (index < lines.length && /^\d+\.\s+/.test(lines[index])) {
+      const startNum = Number(firstNum[1]);
+      if (startNum > 1) list.start = startNum;
+      while (index < lines.length) {
+        let look = index;
+        while (look < lines.length && !lines[look].trim()) look += 1;
+        const numMatch = look < lines.length ? /^\s*(\d+)\.\s+(.*)$/.exec(lines[look]) : null;
+        if (!numMatch) break;
+        index = look + 1;
         const item = el("li");
-        appendInline(item, lines[index].replace(/^\d+\.\s+/, ""));
+        appendInline(item, numMatch[2]);
+        index = consumeSubList(item, lines, index);
         list.append(item);
-        index += 1;
       }
       parent.append(list);
       continue;
     }
     const paragraph = [];
-    while (index < lines.length && lines[index].trim() && !/^(#{1,3})\s+/.test(lines[index]) && !/^[-*]\s+/.test(lines[index]) && !/^\d+\.\s+/.test(lines[index]) && !isTableStart(lines, index) && !isQuoteLine(lines[index])) {
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !isHrLine(lines[index]) &&
+      !/^\s*(#{1,6})\s+/.test(lines[index]) &&
+      !isTopBulletLine(lines[index]) &&
+      !/^\s*\d+\.\s+/.test(lines[index]) &&
+      !isTableStart(lines, index) &&
+      !isQuoteLine(lines[index])
+    ) {
       paragraph.push(lines[index]);
       index += 1;
     }
@@ -980,6 +1026,54 @@ function renderProse(parent, text) {
     });
     parent.append(node);
   }
+}
+
+function isHrLine(line) {
+  return /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line);
+}
+
+function isTopBulletLine(line) {
+  return /^\s{0,3}[-*+]\s+/.test(line) && !isHrLine(line);
+}
+
+function isSubBulletLine(line) {
+  return /^\s{1,}[-*+]\s+/.test(line) && !isHrLine(line);
+}
+
+function consumeSubList(parentLi, lines, startIndex) {
+  let index = startIndex;
+  let subList = null;
+  let lastSubLi = null;
+  while (index < lines.length) {
+    if (!lines[index].trim()) {
+      let look = index + 1;
+      while (look < lines.length && !lines[look].trim()) look += 1;
+      if (look < lines.length && isSubBulletLine(lines[look])) {
+        index = look;
+      } else {
+        break;
+      }
+    }
+    if (isSubBulletLine(lines[index])) {
+      if (!subList) {
+        subList = el("ul", "md-list sub-list");
+        parentLi.append(subList);
+      }
+      lastSubLi = el("li");
+      appendInline(lastSubLi, lines[index].replace(/^\s*[-*+]\s+/, ""));
+      subList.append(lastSubLi);
+      index += 1;
+      continue;
+    }
+    if (lastSubLi && /^\s{2,}\S/.test(lines[index]) && !/^\s*\d+\.\s+/.test(lines[index])) {
+      lastSubLi.append(document.createTextNode(" "));
+      appendInline(lastSubLi, lines[index].trim());
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  return index;
 }
 
 function isQuoteLine(line) {
@@ -1038,7 +1132,24 @@ function richPre(text) {
   return pre;
 }
 
-function appendInline(parent, text) {
+function formatMathInline(raw) {
+  return String(raw)
+    .replace(/\$\\(?:rightarrow|to)\$/g, "→")
+    .replace(/\$\\leftarrow\$/g, "←")
+    .replace(/\$\\leftrightarrow\$/g, "↔")
+    .replace(/\$\\Rightarrow\$/g, "⇒")
+    .replace(/\$\\Leftarrow\$/g, "⇐")
+    .replace(/\$\\Leftrightarrow\$/g, "⇔")
+    .replace(/\$\\(?:le|leq)\$/g, "≤")
+    .replace(/\$\\(?:ge|geq)\$/g, "≥")
+    .replace(/\$\\(?:ne|neq)\$/g, "≠")
+    .replace(/\$\\approx\$/g, "≈")
+    .replace(/\$\\times\$/g, "×")
+    .replace(/\$\\pm\$/g, "±");
+}
+
+function appendInline(parent, rawText) {
+  const text = formatMathInline(rawText);
   const pattern = new RegExp("(`[^`\\n]+`|\\[[^\\[\\]\\n]+\\]\\([^)\\s]+\\)|\\*\\*[^*\\n]+\\*\\*|https?:\\/\\/[^\\s<>]+|file:\\/\\/[^\\s<>]+|" + ABSOLUTE_PATH + "|" + RELATIVE_PATH + ")", "g");
   let cursor = 0;
   for (const match of text.matchAll(pattern)) {
@@ -1050,7 +1161,7 @@ function appendInline(parent, text) {
       parent.append(code);
     } else if (token.startsWith("**")) {
       const strong = el("strong");
-      linkifyPlain(strong, token.slice(2, -2));
+      appendInline(strong, token.slice(2, -2));
       parent.append(strong);
     } else if (token.startsWith("[")) {
       const parsed = /^\[([^\[\]\n]+)\]\(([^)\s]+)\)$/.exec(token);
@@ -1225,7 +1336,9 @@ function when(mtime) {
 function applyMascotState(message) {
   const prefs = message.prefs || {};
   state.mascot.ompSrc = message.ompSrc || state.mascot.ompSrc;
+  state.mascot.ompIdleSrc = message.ompIdleSrc || state.mascot.ompIdleSrc || state.mascot.ompSrc;
   state.mascot.claudeSrc = message.claudeSrc || state.mascot.claudeSrc;
+  state.mascot.claudeIdleSrc = message.claudeIdleSrc || state.mascot.claudeIdleSrc || state.mascot.claudeSrc;
   state.mascot.hasCustom = message.hasCustom === true;
   if (typeof prefs.mode === "string") state.mascot.mode = prefs.mode;
   if (typeof prefs.minimized === "boolean") state.mascot.minimized = prefs.minimized;
@@ -1239,8 +1352,8 @@ function computeSpendSummary() {
     ? state.sessions.filter((item) => item.inWorkspace)
     : state.sessions;
   const summary = {
-    omp: { today: 0, month: 0, count: 0 },
-    claude: { today: 0, month: 0, count: 0 },
+    omp: { today: 0, month: 0, count: 0, running: 0, fresh: 0 },
+    claude: { today: 0, month: 0, count: 0, running: 0, fresh: 0 },
   };
   for (const session of pool) {
     const bucket = summary[session.source];
@@ -1248,8 +1361,31 @@ function computeSpendSummary() {
     bucket.today += Number(session.todayCost) || 0;
     bucket.month += Number(session.monthCost) || 0;
     bucket.count += 1;
+    if (session.activity === "running") bucket.running += 1;
+    else if (session.activity === "fresh") bucket.fresh += 1;
+  }
+  for (const source of ["omp", "claude"]) {
+    const current = summary[source].today;
+    const prev = state.mascot.prevSpend[source];
+    if (prev !== null && current - prev >= 0.0005) {
+      noteSpendDelta(source, current - prev);
+    }
+    if (state.sessions.length > 0) {
+      state.mascot.prevSpend[source] = current;
+    }
   }
   return summary;
+}
+
+function noteSpendDelta(source, added) {
+  const slot = state.mascot.deltas[source];
+  if (!slot) return;
+  slot.amount = Number((slot.amount + added).toFixed(6));
+  clearTimeout(slot.timer);
+  slot.timer = setTimeout(() => {
+    slot.amount = 0;
+    renderMascots();
+  }, 4500);
 }
 
 function visibleMascotSources() {
@@ -1311,21 +1447,40 @@ function renderMascots() {
   mascotDock.append(gear);
   const sources = visibleMascotSources();
   const row = el("div", "mascot-row");
+  const selected = state.sessions.find((item) => item.key === state.selected);
   for (const source of sources) {
-    const src = source === "omp" ? state.mascot.ompSrc : state.mascot.claudeSrc;
+    const info = spend[source] || { today: 0, month: 0, count: 0, running: 0, fresh: 0 };
+    const isBusy = info.running > 0 || Boolean(selected && selected.source === source && selected.activity === "running");
+    const thinkingSrc = source === "omp" ? state.mascot.ompSrc : state.mascot.claudeSrc;
+    const idleSrc = source === "omp" ? (state.mascot.ompIdleSrc || thinkingSrc) : (state.mascot.claudeIdleSrc || thinkingSrc);
+    const src = isBusy ? thinkingSrc : idleSrc;
     if (!src) continue;
-    const info = spend[source] || { today: 0, month: 0, count: 0 };
     const label = source === "omp" ? "OMP" : "Claude";
     const card = el("div", `mascot-card ${source}`);
-    card.title = `${label} (${scopeLabel})\nToday: $${info.today.toFixed(4)}\nThis month: $${info.month.toFixed(4)}\nDrag to move · Right-click to customize`;
+    const moodText = isBusy
+      ? (info.running > 1 ? `Thinking (${info.running} running)` : "Thinking…")
+      : "Idle";
+    card.title = `${label} · ${moodText} (${scopeLabel})\nToday: $${info.today.toFixed(4)}\nThis month: $${info.month.toFixed(4)}\nDrag to move · Right-click to customize`;
     const bubble = el("div", "mascot-bubble");
     const mainLine = el("div", "mascot-bubble-main");
     mainLine.append(
       document.createTextNode(`${label} Today `),
       el("span", `amt ${source}`, formatSpendAmount(info.today)),
     );
+    const deltaAmt = state.mascot.deltas[source]?.amount || 0;
+    if (deltaAmt > 0) {
+      mainLine.append(el("span", "spend-delta", `↑${formatSpendAmount(deltaAmt)}`));
+    }
     const subLine = el("div", "mascot-bubble-sub", `Month ${formatSpendAmount(info.month)}`);
     bubble.append(mainLine, subLine);
+    const statusParts = [];
+    if (info.running > 1) statusParts.push(`Thinking · ${info.running} running`);
+    else if (isBusy) statusParts.push("Thinking…");
+    if (info.fresh > 0) statusParts.push(`${info.fresh} new ${info.fresh === 1 ? "reply" : "replies"}`);
+    if (statusParts.length) {
+      const statusKind = isBusy ? "running" : "fresh";
+      bubble.append(el("div", `mascot-status ${statusKind}`, statusParts.join(" · ")));
+    }
     const img = document.createElement("img");
     img.className = "mascot-avatar";
     img.src = src;
@@ -1336,6 +1491,79 @@ function renderMascots() {
   }
   mascotDock.append(row);
   applyMascotPosition();
+}
+
+let diagramSeq = 0;
+
+function renderDiagrams(root) {
+  if (!window.mermaid || !root) return;
+  const blocks = [...root.querySelectorAll("pre > code.language-mermaid")];
+  if (!blocks.length) return;
+  if (!renderDiagrams.ready) {
+    const color = getComputedStyle(document.body).backgroundColor;
+    const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+    const lum = match ? (0.2126 * Number(match[1]) + 0.7152 * Number(match[2]) + 0.0722 * Number(match[3])) / 255 : 1;
+    window.mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "antiscript",
+      htmlLabels: true,
+      fontFamily: getComputedStyle(document.body).fontFamily || "sans-serif",
+      theme: lum < 0.5 ? "dark" : "default",
+    });
+    renderDiagrams.ready = true;
+  }
+  blocks.forEach((code) => {
+    const pre = code.parentElement;
+    if (!pre || pre.dataset.mermaidRendered === "1") return;
+    pre.dataset.mermaidRendered = "1";
+    const source = code.textContent || "";
+    const id = `chat_mmd_${++diagramSeq}`;
+    window.mermaid.render(id, source).then((result) => {
+      if (!pre.isConnected) return;
+      const host = el("div", "mermaid");
+      host.innerHTML = result.svg;
+      const svg = host.querySelector("svg");
+      if (svg) {
+        svg.removeAttribute("height");
+        svg.style.width = "100%";
+        svg.style.height = "auto";
+        svg.style.maxWidth = "none";
+      }
+      const zoom = el("button", "mermaid-zoom", "Full screen");
+      zoom.type = "button";
+      zoom.addEventListener("click", () => openDiagram(svg));
+      const showZoom = (event) => {
+        const top = event.clientY - host.getBoundingClientRect().top;
+        zoom.classList.toggle("is-visible", top <= 44 || zoom.contains(event.target));
+      };
+      host.addEventListener("mousemove", showZoom);
+      host.addEventListener("mouseleave", () => zoom.classList.remove("is-visible"));
+      host.append(zoom);
+      pre.replaceWith(host);
+    }).catch(() => {
+      if (!pre.isConnected) return;
+      pre.classList.add("mermaid-error");
+    });
+  });
+}
+
+function openDiagram(svg) {
+  if (!svg || !diagramEl || !diagramStage) return;
+  const copy = svg.cloneNode(true);
+  copy.removeAttribute("width");
+  copy.removeAttribute("height");
+  copy.style.width = "100%";
+  copy.style.height = "100%";
+  copy.style.maxWidth = "100%";
+  copy.style.maxHeight = "100%";
+  diagramStage.replaceChildren(copy);
+  diagramEl.hidden = false;
+}
+
+function closeDiagram() {
+  if (!diagramEl || !diagramStage) return;
+  diagramEl.hidden = true;
+  diagramStage.replaceChildren();
 }
 
 function applyMascotPosition() {
