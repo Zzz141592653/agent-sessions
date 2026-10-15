@@ -438,13 +438,15 @@ a.link {
   font-size: 13px;
 }
 .md th, .md td {
-  border-bottom: 1px solid var(--line);
-  padding: 6px 8px;
+  border: 1px solid var(--line);
+  padding: 7px 10px;
   text-align: left;
   vertical-align: top;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
-.md th { font-weight: 650; color: var(--muted); }
+.md th:first-child, .md td:first-child { min-width: 9.5em; }
+.md th { font-weight: 650; color: var(--muted); background: var(--soft); }
 .thinking { margin: 0 0 0.2em; }
 .thinking summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 .thinking .md {
@@ -548,18 +550,39 @@ a.link {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-.amt.omp { color: #2dd4bf; }
-.amt.claude { color: #fb923c; }
-.spend-delta {
-  display: inline-block;
-  margin-left: 5px;
-  padding: 0 5px;
+.amt.omp { color: #2dd4bf; transition: color 0.25s ease, transform 0.25s ease; display: inline-block; }
+.amt.claude { color: #fb923c; transition: color 0.25s ease, transform 0.25s ease; display: inline-block; }
+.amt.pulse {
+  color: #4ade80 !important;
+  transform: scale(1.08);
+}
+.mascot-toast-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 5px;
+  pointer-events: none;
+}
+.mascot-toast-stack:empty { display: none; }
+.spend-toast {
+  padding: 2px 8px;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
+  line-height: 1.35;
   color: #4ade80;
-  background: rgba(74, 222, 128, 0.16);
-  animation: spendPop 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  background: rgba(20, 83, 45, 0.88);
+  border: 1px solid rgba(74, 222, 128, 0.45);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  animation: toastEnter 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 1.4s ease, transform 1.4s ease;
+}
+.spend-toast.fading {
+  opacity: 0;
+  transform: translateY(-10px) scale(0.95);
 }
 .mascot-status {
   font-size: 9.5px;
@@ -570,8 +593,8 @@ a.link {
 }
 .mascot-status.running { color: #2dd4bf; }
 .mascot-status.fresh { color: #fb923c; }
-@keyframes spendPop {
-  from { opacity: 0; transform: translateY(4px) scale(0.9); }
+@keyframes toastEnter {
+  from { opacity: 0; transform: translateY(6px) scale(0.85); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 .mascot-avatar {

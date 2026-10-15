@@ -124,6 +124,8 @@ function refreshSessionMeta(session) {
   session.cost = meta.cost || 0;
   session.todayCost = meta.todayCost || 0;
   session.monthCost = meta.monthCost || 0;
+  session.turnCount = meta.turnCount || 0;
+  session.recentTurnCosts = meta.recentTurnCosts || [];
   return session;
 }
 
@@ -593,6 +595,8 @@ function summary(source, filePath, meta, folders) {
     cost: meta.cost || 0,
     todayCost: meta.todayCost || 0,
     monthCost: meta.monthCost || 0,
+    turnCount: meta.turnCount || 0,
+    recentTurnCosts: meta.recentTurnCosts || [],
     inWorkspace: belongsToWorkspace(cwd, folders),
     filePath,
   };
@@ -779,6 +783,7 @@ function resolveStats(acc, fallbackMtime) {
   let todayWeight = 0;
   let monthWeight = 0;
   let totalWeight = 0;
+  const claudeWeights = [];
   if (acc.msgTokens && acc.msgTokens.size > 0) {
     for (const item of acc.msgTokens.values()) {
       msgTokSum += item.tok;
@@ -789,26 +794,43 @@ function resolveStats(acc, fallbackMtime) {
       totalWeight += weight;
       if (ts >= monthStart) monthWeight += weight;
       if (ts >= dayStart) todayWeight += weight;
+      claudeWeights.push({ ts, weight });
     }
   }
   const totalTokens = Math.max(acc.totalTokens || 0, acc.costStateTokens || 0, msgTokSum);
   const rawCost = acc.costStateUSD > 0 ? acc.costStateUSD : (acc.cost > 0 ? acc.cost : msgCostSum);
   let todayCost = 0;
   let monthCost = 0;
+  let turnCount = 0;
+  let recentTurnCosts = [];
   if (acc.turnCosts && acc.turnCosts.length > 0) {
+    turnCount = acc.turnCosts.length;
     for (const item of acc.turnCosts) {
       const ts = item.ts || fallbackTs;
       if (ts >= monthStart) monthCost += item.cost;
       if (ts >= dayStart) todayCost += item.cost;
     }
+    recentTurnCosts = acc.turnCosts
+      .filter((item) => (item.ts || fallbackTs) >= dayStart && item.cost > 0)
+      .slice(-8)
+      .map((item) => Number(item.cost.toFixed(6)));
   } else if (rawCost > 0) {
     if (totalWeight > 0) {
       todayCost = rawCost * (todayWeight / totalWeight);
       monthCost = rawCost * (monthWeight / totalWeight);
+      turnCount = claudeWeights.length;
+      recentTurnCosts = claudeWeights
+        .filter((item) => item.ts >= dayStart && item.weight > 0)
+        .slice(-8)
+        .map((item) => Number(((rawCost * item.weight) / totalWeight).toFixed(6)));
     } else {
       const ts = acc.costStateTs || fallbackTs;
       if (ts >= monthStart) monthCost = rawCost;
-      if (ts >= dayStart) todayCost = rawCost;
+      if (ts >= dayStart) {
+        todayCost = rawCost;
+        turnCount = 1;
+        recentTurnCosts = [Number(rawCost.toFixed(6))];
+      }
     }
   }
   const spec = lookupModelSpec(acc.model);
@@ -820,6 +842,8 @@ function resolveStats(acc, fallbackMtime) {
     cost: rawCost > 0 ? Number(rawCost.toFixed(6)) : 0,
     todayCost: todayCost > 0 ? Number(todayCost.toFixed(6)) : 0,
     monthCost: monthCost > 0 ? Number(monthCost.toFixed(6)) : 0,
+    turnCount,
+    recentTurnCosts,
   };
 }
 

@@ -27,11 +27,10 @@ const state = {
     minimized: false,
     x: null,
     y: null,
-    prevSpend: { omp: null, claude: null },
-    deltas: {
-      omp: { amount: 0, timer: 0 },
-      claude: { amount: 0, timer: 0 },
-    },
+    initialized: false,
+    knownSessions: new Map(),
+    displayedToday: { omp: 0, claude: 0 },
+    toastStacks: { omp: null, claude: null },
   },
 };
 
@@ -453,7 +452,8 @@ function syncSessionStats(key, stats) {
     session.totalTokens !== stats.totalTokens ||
     session.cost !== stats.cost ||
     session.todayCost !== stats.todayCost ||
-    session.monthCost !== stats.monthCost;
+    session.monthCost !== stats.monthCost ||
+    session.turnCount !== stats.turnCount;
   Object.assign(session, stats);
   return changed;
 }
@@ -1095,7 +1095,11 @@ function renderTable(parent, lines, index) {
   table.append(head);
   index += 2;
   let rows = 0;
-  while (index < lines.length && lines[index].includes("|") && rows < 30) {
+  while (index < lines.length && lines[index].includes("|") && rows < 250) {
+    if (/^\s*\|?\s*:?-{3,}/.test(lines[index])) {
+      index += 1;
+      continue;
+    }
     const tr = el("tr");
     for (const cell of splitRow(lines[index])) {
       const td = el("td");
@@ -1150,12 +1154,14 @@ function formatMathInline(raw) {
 
 function appendInline(parent, rawText) {
   const text = formatMathInline(rawText);
-  const pattern = new RegExp("(`[^`\\n]+`|\\[[^\\[\\]\\n]+\\]\\([^)\\s]+\\)|\\*\\*[^*\\n]+\\*\\*|https?:\\/\\/[^\\s<>]+|file:\\/\\/[^\\s<>]+|" + ABSOLUTE_PATH + "|" + RELATIVE_PATH + ")", "g");
+  const pattern = new RegExp("(<br\\s*\\/?>|`[^`\\n]+`|\\[[^\\[\\]\\n]+\\]\\([^)\\s]+\\)|\\*\\*[^*\\n]+\\*\\*|https?:\\/\\/[^\\s<>]+|file:\\/\\/[^\\s<>]+|" + ABSOLUTE_PATH + "|" + RELATIVE_PATH + ")", "gi");
   let cursor = 0;
   for (const match of text.matchAll(pattern)) {
     if (match.index > cursor) parent.append(document.createTextNode(text.slice(cursor, match.index)));
     const token = match[0];
-    if (token.startsWith("`")) {
+    if (/^<br\s*\/?>$/i.test(token)) {
+      parent.append(document.createElement("br"));
+    } else if (token.startsWith("`")) {
       const code = el("code");
       linkifyPlain(code, token.slice(1, -1));
       parent.append(code);
@@ -1364,30 +1370,91 @@ function computeSpendSummary() {
     if (session.activity === "running") bucket.running += 1;
     else if (session.activity === "fresh") bucket.fresh += 1;
   }
-  for (const source of ["omp", "claude"]) {
-    const current = summary[source].today;
-    const prev = state.mascot.prevSpend[source];
-    if (prev !== null && current - prev >= 0.0005) {
-      noteSpendDelta(source, current - prev);
-    }
-    if (state.sessions.length > 0) {
-      state.mascot.prevSpend[source] = current;
-    }
-  }
+  noteSessionTurnToasts(state.sessions);
   return summary;
 }
 
-function noteSpendDelta(source, added) {
-  const slot = state.mascot.deltas[source];
-  if (!slot) return;
-  slot.amount = Number((slot.amount + added).toFixed(6));
-  clearTimeout(slot.timer);
-  slot.timer = setTimeout(() => {
-    slot.amount = 0;
-    renderMascots();
-  }, 4500);
+function ensureToastStack(source) {
+  if (!state.mascot.toastStacks[source]) {
+    state.mascot.toastStacks[source] = el("div", "mascot-toast-stack");
+  }
+  return state.mascot.toastStacks[source];
 }
 
+function formatCallDelta(amount) {
+  const n = Number(amount) || 0;
+  if (n <= 0) return "";
+  if (n < 0.001) return `+$${n.toFixed(4)}`;
+  if (n < 0.1) return `+$${n.toFixed(3)}`;
+  return `+$${n.toFixed(2)}`;
+}
+
+function spawnSpendToast(source, amount, delayMs = 0) {
+  const text = formatCallDelta(amount);
+  if (!text) return;
+  setTimeout(() => {
+    const stack = ensureToastStack(source);
+    while (stack.children.length >= 5) {
+      stack.firstElementChild.remove();
+    }
+    const toast = el("div", "spend-toast", `↑ ${text}`);
+    stack.append(toast);
+    const amtEl = mascotDock?.querySelector(`.mascot-card.${source} .amt`);
+    if (amtEl) {
+      amtEl.classList.add("pulse");
+      setTimeout(() => amtEl.classList.remove("pulse"), 700);
+    }
+    setTimeout(() => {
+      toast.classList.add("fading");
+    }, 5000);
+    setTimeout(() => {
+      toast.remove();
+    }, 6500);
+  }, delayMs);
+}
+
+function noteSessionTurnToasts(allSessions) {
+  if (!allSessions || !allSessions.length) return;
+  const known = state.mascot.knownSessions;
+  if (!state.mascot.initialized) {
+    for (const session of allSessions) {
+      known.set(session.key, {
+        turnCount: Number(session.turnCount) || 0,
+        todayCost: Number(session.todayCost) || 0,
+      });
+    }
+    state.mascot.initialized = true;
+    return;
+  }
+  const queued = { omp: [], claude: [] };
+  for (const session of allSessions) {
+    const source = session.source;
+    if (source !== "omp" && source !== "claude") continue;
+    const turnCount = Number(session.turnCount) || 0;
+    const todayCost = Number(session.todayCost) || 0;
+    const prev = known.get(session.key);
+    if (!prev) {
+      const recent = Array.isArray(session.recentTurnCosts) ? session.recentTurnCosts : [];
+      if (recent.length) queued[source].push(...recent);
+      else if (todayCost >= 0.0002) queued[source].push(todayCost);
+    } else {
+      const addedTurns = turnCount - prev.turnCount;
+      const recent = Array.isArray(session.recentTurnCosts) ? session.recentTurnCosts : [];
+      if (addedTurns > 0 && recent.length > 0) {
+        const slice = recent.slice(-Math.min(addedTurns, recent.length));
+        queued[source].push(...slice);
+      } else if (todayCost - prev.todayCost >= 0.0002) {
+        queued[source].push(todayCost - prev.todayCost);
+      }
+    }
+    known.set(session.key, { turnCount, todayCost });
+  }
+  for (const source of ["omp", "claude"]) {
+    queued[source].forEach((amt, idx) => {
+      spawnSpendToast(source, amt, idx * 220);
+    });
+  }
+}
 function visibleMascotSources() {
   const mode = state.mascot.mode || "auto";
   if (mode === "omp") return ["omp"];
@@ -1461,16 +1528,12 @@ function renderMascots() {
       ? (info.running > 1 ? `Thinking (${info.running} running)` : "Thinking…")
       : "Idle";
     card.title = `${label} · ${moodText} (${scopeLabel})\nToday: $${info.today.toFixed(4)}\nThis month: $${info.month.toFixed(4)}\nDrag to move · Right-click to customize`;
+    const toastStack = ensureToastStack(source);
     const bubble = el("div", "mascot-bubble");
     const mainLine = el("div", "mascot-bubble-main");
-    mainLine.append(
-      document.createTextNode(`${label} Today `),
-      el("span", `amt ${source}`, formatSpendAmount(info.today)),
-    );
-    const deltaAmt = state.mascot.deltas[source]?.amount || 0;
-    if (deltaAmt > 0) {
-      mainLine.append(el("span", "spend-delta", `↑${formatSpendAmount(deltaAmt)}`));
-    }
+    const amtSpan = el("span", `amt ${source}`, formatSpendAmount(info.today));
+    animateSpendValue(source, amtSpan, info.today);
+    mainLine.append(document.createTextNode(`${label} Today `), amtSpan);
     const subLine = el("div", "mascot-bubble-sub", `Month ${formatSpendAmount(info.month)}`);
     bubble.append(mainLine, subLine);
     const statusParts = [];
@@ -1486,11 +1549,37 @@ function renderMascots() {
     img.src = src;
     img.alt = `${label} mascot`;
     img.draggable = false;
-    card.append(bubble, img);
+    card.append(toastStack, bubble, img);
     row.append(card);
   }
   mascotDock.append(row);
   applyMascotPosition();
+}
+
+function animateSpendValue(source, element, targetValue) {
+  const target = Number(targetValue) || 0;
+  const prev = state.mascot.displayedToday[source];
+  state.mascot.displayedToday[source] = target;
+  if (!(prev > 0) || Math.abs(target - prev) < 0.0005 || target < prev) {
+    element.textContent = formatSpendAmount(target);
+    return;
+  }
+  const start = performance.now();
+  const duration = 650;
+  element.classList.add("pulse");
+  const step = (now) => {
+    const t = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - t, 3);
+    const current = prev + (target - prev) * eased;
+    element.textContent = formatSpendAmount(current);
+    if (t < 1 && element.isConnected) {
+      requestAnimationFrame(step);
+    } else if (element.isConnected) {
+      element.textContent = formatSpendAmount(target);
+      setTimeout(() => element.classList.remove("pulse"), 250);
+    }
+  };
+  requestAnimationFrame(step);
 }
 
 let diagramSeq = 0;
