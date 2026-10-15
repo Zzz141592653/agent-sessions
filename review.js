@@ -8,6 +8,7 @@ const MarkdownIt = require("markdown-it");
 
 const { normalizeRecord, openRound, noteLiveFile, closeRound, hashText } = require("./comments");
 const { panelIsOpen, releaseClosedPanel } = require("./panel-life");
+const { hasOmpProcess } = require("./sources");
 
 const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
 const MAX_BYTES = 2_000_000;
@@ -293,7 +294,7 @@ function liveTty(session) {
     if (!text.includes(session.filePath)) continue;
     try {
       const commands = execFileSync("ps", ["-t", name, "-o", "command="], { encoding: "utf8" });
-      if (/(^|\s)omp(\s|$)/.test(commands)) return `/dev/${name}`;
+      if (hasOmpProcess(commands)) return `/dev/${name}`;
     } catch {
       // This tty has no live process.
     }
@@ -607,4 +608,4 @@ ${mermaid}
 </html>`;
 }
 
-module.exports = { openReviewedFile, liveTty, pasteIntoTerminal, noteInputFocus, selectAllInInput };
+module.exports = { openReviewedFile, liveTty, hasOmpProcess, pasteIntoTerminal, noteInputFocus, selectAllInInput };

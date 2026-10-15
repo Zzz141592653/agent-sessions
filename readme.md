@@ -4,7 +4,7 @@ You leave a few coding agents running and come back to a row of terminals. Which
 
 ## You come back and every terminal looks the same
 
-Opening each one to see whether it answered is the slow part. The list marks the session that just replied and the one still running. Click **1 new** or **1 running** and those are the only rows. The session you have open keeps updating while you read it.
+Opening each one to see whether it answered is the slow part. The list marks the session that just replied and the one still running, along with each session's model, context usage, total tokens, and estimated cost. Click **1 new** or **1 running** and those are the only rows. The session you have open keeps updating while you read it.
 
 ![One session is still running, one has a new reply, and the reply shows the files it changed.](docs/images/library.png)
 

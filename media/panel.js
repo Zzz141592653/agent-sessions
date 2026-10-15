@@ -109,6 +109,7 @@ window.addEventListener("message", (event) => {
     }
     state.selected = message.key;
     state.transcript = message.transcript;
+    if (message.transcript?.stats) syncSessionStats(message.key, message.transcript.stats);
     if (message.following != null) state.following = message.following === true;
     if (message.canReply != null) state.canReply = message.canReply === true;
     if (message.replyHint) replyNotice.textContent = message.replyHint;
@@ -276,7 +277,7 @@ function renderList() {
     if (state.source !== "all" && session.source !== state.source) return false;
     if (state.scope === "workspace" && !session.inWorkspace) return false;
     if (!query) return true;
-    return `${session.title} ${session.preview} ${session.project}`.toLowerCase().includes(query);
+    return `${session.title} ${session.preview} ${session.project} ${session.model || ""}`.toLowerCase().includes(query);
   });
   const shown = matched.filter((session) => !session.hidden || session.activity === "fresh" || session.activity === "running");
   const hidden = matched.filter((session) => session.hidden && session.activity !== "fresh" && session.activity !== "running");
@@ -326,6 +327,12 @@ function sessionRow(session) {
   else if (session.activity === "fresh") titleRow.append(el("span", "badge fresh", "New reply"));
   main.append(titleRow);
   main.append(el("span", "meta", `${session.project ? `${session.project} · ` : ""}${when(session.mtime)}`));
+  const statsText = formatSessionRowStats(session);
+  if (statsText) {
+    const statsEl = el("span", "stats", statsText);
+    statsEl.title = formatSessionStatsTooltip(session);
+    main.append(statsEl);
+  }
   main.addEventListener("click", () => openSessionRow(session));
   const actions = el("div", "session-actions");
   if (session.hidden) actions.append(sessionAction("Restore", () => vscode.postMessage({ type: "unhide", key: session.key })));
@@ -406,9 +413,102 @@ function applyMeta() {
   const transcript = state.transcript;
   const session = state.sessions.find((item) => item.key === state.selected);
   titleEl.textContent = transcript?.title || session?.title || "Session";
-  metaEl.textContent = session
-    ? `${session.sourceLabel}${session.project ? ` · ${session.project}` : ""}${state.following ? " · live" : ""}`
-    : "";
+  if (!session) {
+    metaEl.textContent = "";
+    metaEl.title = "";
+    return;
+  }
+  const stats = transcript?.stats || session;
+  const parts = [session.sourceLabel];
+  if (session.project) parts.push(session.project);
+  const model = shortModel(stats?.model || session.model);
+  if (model) parts.push(model);
+  const ctx = formatContextUsage(stats?.contextTokens ?? session.contextTokens, stats?.contextWindow ?? session.contextWindow, true);
+  if (ctx) parts.push(ctx);
+  const tok = formatCompactTokens(stats?.totalTokens ?? session.totalTokens);
+  if (tok) parts.push(`${tok} tok`);
+  const cost = formatUSD(stats?.cost ?? session.cost);
+  if (cost) parts.push(cost);
+  if (state.following) parts.push("live");
+  metaEl.textContent = parts.join(" · ");
+  metaEl.title = formatSessionStatsTooltip({ ...session, ...stats });
+}
+
+function syncSessionStats(key, stats) {
+  if (!stats) return false;
+  const session = state.sessions.find((item) => item.key === key);
+  if (!session) return false;
+  const changed =
+    session.model !== stats.model ||
+    session.contextTokens !== stats.contextTokens ||
+    session.totalTokens !== stats.totalTokens ||
+    session.cost !== stats.cost;
+  Object.assign(session, stats);
+  return changed;
+}
+
+function shortModel(model) {
+  if (!model || model === "<synthetic>") return "";
+  return String(model).trim().split("/").pop();
+}
+
+function formatCompactTokens(count) {
+  const n = Number(count) || 0;
+  if (n <= 0) return "";
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) {
+    const k = n / 1000;
+    return `${(k >= 100 ? k.toFixed(0) : k.toFixed(1)).replace(/\.0$/, "")}k`;
+  }
+  const m = n / 1_000_000;
+  return `${(m >= 100 ? m.toFixed(0) : m.toFixed(1)).replace(/\.0$/, "")}M`;
+}
+
+function formatContextUsage(contextTokens, contextWindow, detailed) {
+  const ctx = formatCompactTokens(contextTokens);
+  if (!ctx) return "";
+  const win = Number(contextWindow) || 0;
+  if (win > 0) {
+    if (detailed) {
+      const pct = Math.min(999, Math.round((Number(contextTokens) / win) * 100));
+      return `ctx ${ctx}/${formatCompactTokens(win)} (${pct}%)`;
+    }
+  }
+  return `ctx ${ctx}`;
+}
+
+function formatUSD(cost) {
+  const n = Number(cost) || 0;
+  if (n <= 0) return "";
+  if (n < 0.01) return `$${n.toFixed(3)}`;
+  return `$${n.toFixed(2)}`;
+}
+
+function formatSessionRowStats(session) {
+  const parts = [];
+  const model = shortModel(session.model);
+  if (model) parts.push(model);
+  const ctx = formatContextUsage(session.contextTokens, session.contextWindow, false);
+  if (ctx) parts.push(ctx);
+  const tok = formatCompactTokens(session.totalTokens);
+  if (tok) parts.push(`${tok} tok`);
+  const cost = formatUSD(session.cost);
+  if (cost) parts.push(cost);
+  return parts.join(" · ");
+}
+
+function formatSessionStatsTooltip(session) {
+  const lines = [];
+  if (session.model) lines.push(`Model: ${session.model}`);
+  if (session.contextTokens > 0) {
+    const win = session.contextWindow > 0
+      ? ` / ${session.contextWindow.toLocaleString()} (${Math.round((session.contextTokens / session.contextWindow) * 100)}%)`
+      : "";
+    lines.push(`Context: ${session.contextTokens.toLocaleString()}${win} tokens`);
+  }
+  if (session.totalTokens > 0) lines.push(`Total tokens: ${session.totalTokens.toLocaleString()}`);
+  if (session.cost > 0) lines.push(`Estimated cost: $${session.cost.toFixed(4)}`);
+  return lines.join("\n");
 }
 
 function renderThread(mode) {
@@ -504,11 +604,12 @@ function applyTranscriptPatch(message) {
     title: message.title || state.transcript.title,
     omitted: message.omitted,
     files: message.files || state.transcript.files,
+    stats: message.stats || state.transcript.stats,
     turns,
   };
   if (message.following != null) state.following = message.following === true;
+  if (message.stats && syncSessionStats(message.key, message.stats)) renderList();
   applyMeta();
-  if (message.files) renderFiles();
   if (state.find.trim()) {
     renderThread("live");
     return;

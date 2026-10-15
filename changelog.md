@@ -1,3 +1,11 @@
+# 1.5.0
+
+Since 1.4.1.
+
+- Recognize custom `omp-*` binaries (such as `omp-gemini-test`) and path-invoked `omp` commands when checking whether a session's terminal window is open.
+- Show each session's current model, context window usage, total tokens, and estimated cost in the session list and thread header.
+- Keep the file review scroll position and rendered diagrams steady when adding or deleting a comment.
+
 # 1.4.1
 
 Since 1.4.0.

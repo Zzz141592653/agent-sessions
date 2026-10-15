@@ -292,6 +292,7 @@ function postTranscript(session, options) {
   }
   readTranscript(follow.reader);
   const next = snapshotTranscript(follow.reader);
+  if (next.stats) Object.assign(session, next.stats);
   const patch = options.live ? diffTranscript(follow.view, next) : { full: true };
   follow.view = {
     title: next.title,
@@ -313,6 +314,7 @@ function postTranscript(session, options) {
       omitted: next.omitted,
       title: next.title,
       files: patch.files,
+      stats: next.stats,
       live: true,
       following,
     });
@@ -325,6 +327,7 @@ function postTranscript(session, options) {
       title: next.title,
       omitted: next.omitted,
       files: next.files,
+      stats: next.stats,
       turns: next.turns,
     },
     live: options.live === true,

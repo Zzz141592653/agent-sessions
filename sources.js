@@ -24,7 +24,14 @@ const SOURCES = {
 };
 
 const headerCache = new Map();
+let modelCatalogCache = { mtimeMs: -1, map: new Map() };
 
+const MARKER_ROLE_ASSISTANT = Buffer.from('"role":"assistant"');
+const MARKER_TYPE_ASSISTANT = Buffer.from('"type":"assistant"');
+const MARKER_MODEL_CHANGE = Buffer.from('"model_change"');
+const MARKER_COST_STATE = Buffer.from('"cost-state"');
+const MARKER_TITLE = Buffer.from('"title');
+const MARKER_AI_TITLE = Buffer.from('"ai-title"');
 function listSessions(workspacePaths) {
   const folders = (workspacePaths || []).map((folder) => path.resolve(folder));
   const seen = new Set();
@@ -52,8 +59,7 @@ function listOmp(folders, seen) {
       for (const name of safeReaddir(dir)) {
         if (!name.endsWith(".jsonl")) continue;
         const filePath = path.join(dir, name);
-        const meta = cachedHeader(filePath, seen, false, (entry, acc) => {
-          if (entry.type === "title" && entry.title) acc.title = entry.title;
+        const meta = cachedHeader(filePath, seen, "omp", (entry, acc) => {
           if (entry.type === "session") {
             acc.cwd = entry.cwd || acc.cwd;
             acc.timestamp = entry.timestamp || acc.timestamp;
@@ -62,6 +68,7 @@ function listOmp(folders, seen) {
           if (!acc.preview && entry.type === "message" && entry.message?.role === "user") {
             acc.preview = clip(messageText(entry.message).replace(/\s+/g, " ").trim(), 140);
           }
+          noteOmpUsage(acc, entry);
         });
         if (!meta) continue;
         sessions.push(summary("omp", filePath, meta, folders));
@@ -80,15 +87,15 @@ function listClaude(folders, seen) {
     for (const name of safeReaddir(dir)) {
       if (!name.endsWith(".jsonl")) continue;
       const filePath = path.join(dir, name);
-      const meta = cachedHeader(filePath, seen, true, (entry, acc) => {
+      const meta = cachedHeader(filePath, seen, "claude", (entry, acc) => {
         if (entry.isSidechain === true) acc.sidechain = true;
-        if (entry.type === "ai-title" && entry.aiTitle) acc.title = entry.aiTitle;
         if (!acc.cwd && entry.cwd) acc.cwd = entry.cwd;
         if (!acc.timestamp && entry.timestamp) acc.timestamp = entry.timestamp;
         if (!acc.preview && entry.type === "user") {
           const text = claudeUserText(entry);
           if (text && !isMetaText(text)) acc.preview = clip(text.replace(/\s+/g, " ").trim(), 140);
         }
+        noteClaudeUsage(acc, entry);
       });
       if (!meta) continue;
       sessions.push(summary("claude", filePath, meta, folders));
@@ -97,7 +104,7 @@ function listClaude(folders, seen) {
   return sessions;
 }
 
-function cachedHeader(filePath, seen, mirror, visit) {
+function cachedHeader(filePath, seen, source, visit) {
   seen.add(filePath);
   let stat;
   try {
@@ -107,13 +114,21 @@ function cachedHeader(filePath, seen, mirror, visit) {
   }
   const cached = headerCache.get(filePath);
   if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.meta;
-  if (mirror && isOmpMirror(filePath)) {
-    headerCache.set(filePath, { size: stat.size, mtimeMs: stat.mtimeMs, meta: null });
+  if (source === "claude" && isOmpMirror(filePath)) {
+    headerCache.set(filePath, { size: stat.size, mtimeMs: stat.mtimeMs, offset: stat.size, acc: null, meta: null });
     return null;
   }
-  const meta = readHeader(filePath, visit);
-  const stored = meta && !meta.sidechain ? meta : null;
-  headerCache.set(filePath, { size: stat.size, mtimeMs: stat.mtimeMs, meta: stored });
+  const prev = cached && cached.acc && stat.size > cached.offset ? cached : null;
+  const scanned = scanSessionMeta(filePath, stat, source, visit, prev);
+  if (!scanned) return null;
+  const stored = !scanned.acc.sidechain ? finalizeMeta(scanned.acc, stat) : null;
+  headerCache.set(filePath, {
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    offset: scanned.offset,
+    acc: scanned.acc,
+    meta: stored,
+  });
   return stored;
 }
 
@@ -179,6 +194,7 @@ function createTranscriptReader(filePath, source) {
     filesStamp: -1,
     cachedFiles: [],
     cachedPatches: [],
+    usage: createUsageState(),
   };
 }
 
@@ -231,7 +247,8 @@ function applyLine(reader, line) {
 }
 
 function applyOmp(reader, entry) {
-  if (entry.type === "title" && entry.title) reader.title = entry.title;
+  noteOmpUsage(reader.usage, entry);
+  if ((entry.type === "title" || entry.type === "title_change") && entry.title) reader.title = entry.title;
   if (entry.type !== "message" || !entry.message) return;
   const message = entry.message;
   if (message.role === "user") {
@@ -264,6 +281,7 @@ function applyOmp(reader, entry) {
 }
 
 function applyClaude(reader, entry) {
+  noteClaudeUsage(reader.usage, entry);
   if (entry.type === "ai-title" && entry.aiTitle) reader.title = entry.aiTitle;
   if (entry.type === "assistant") {
     const message = entry.message || {};
@@ -351,6 +369,7 @@ function snapshotTranscript(reader) {
     omitted,
     files: reader.cachedFiles,
     patches: reader.cachedPatches,
+    stats: resolveStats(reader.usage),
     turns: omitted ? turns.slice(turns.length - TURN_LIMIT) : turns.slice(),
   };
 }
@@ -534,9 +553,260 @@ function summary(source, filePath, meta, folders) {
     project: cwd ? path.basename(cwd) : "",
     mtime: meta.mtime,
     size: meta.size || 0,
+    model: meta.model || "",
+    contextTokens: meta.contextTokens || 0,
+    contextWindow: meta.contextWindow || 0,
+    totalTokens: meta.totalTokens || 0,
+    cost: meta.cost || 0,
     inWorkspace: belongsToWorkspace(cwd, folders),
     filePath,
   };
+}
+
+function createUsageState() {
+  return {
+    title: "",
+    preview: "",
+    cwd: "",
+    timestamp: "",
+    sidechain: false,
+    model: "",
+    contextTokens: 0,
+    totalTokens: 0,
+    cost: 0,
+    msgTokens: null,
+    msgSeq: 0,
+    costStateTokens: 0,
+    costStateUSD: 0,
+  };
+}
+
+function finalizeMeta(acc, stat) {
+  const stats = resolveStats(acc);
+  return {
+    title: acc.title,
+    preview: acc.preview,
+    cwd: acc.cwd,
+    timestamp: acc.timestamp,
+    mtime: stat.mtimeMs,
+    size: stat.size,
+    sidechain: acc.sidechain,
+    ...stats,
+  };
+}
+
+function scanSessionMeta(filePath, stat, source, visit, prev) {
+  const acc = prev ? prev.acc : createUsageState();
+  const startOffset = prev ? prev.offset : 0;
+  const len = stat.size - startOffset;
+  if (len <= 0) return { acc, offset: startOffset };
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const buf = Buffer.alloc(len);
+    const n = fs.readSync(fd, buf, 0, len, startOffset);
+    const slice = buf.subarray(0, n);
+    let pos = 0;
+    let consumed = startOffset;
+    while (pos < slice.length) {
+      const nl = slice.indexOf(10, pos);
+      if (nl < 0) break;
+      const lineBuf = slice.subarray(pos, nl);
+      const absPos = startOffset + pos;
+      pos = nl + 1;
+      consumed = startOffset + pos;
+      if (absPos >= HEADER_BYTES && !shouldParseMetaLine(source, lineBuf)) continue;
+      const trimmed = lineBuf.toString("utf8").trim();
+      if (!trimmed.startsWith("{")) continue;
+      try {
+        visit(JSON.parse(trimmed), acc);
+      } catch {
+        // Skip a malformed line.
+      }
+    }
+    return { acc, offset: consumed };
+  } catch {
+    return null;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function shouldParseMetaLine(source, lineBuf) {
+  if (source === "omp") {
+    return lineBuf.includes(MARKER_ROLE_ASSISTANT) || lineBuf.includes(MARKER_MODEL_CHANGE) || lineBuf.includes(MARKER_TITLE);
+  }
+  if (source === "claude") {
+    return lineBuf.includes(MARKER_COST_STATE) || lineBuf.includes(MARKER_TYPE_ASSISTANT) || lineBuf.includes(MARKER_AI_TITLE);
+  }
+  return false;
+}
+
+function noteOmpUsage(acc, entry) {
+  if ((entry.type === "title" || entry.type === "title_change") && entry.title) acc.title = entry.title;
+  if (entry.type === "model_change" && entry.model && entry.model !== "<synthetic>") acc.model = String(entry.model);
+  if (entry.type !== "message" || entry.message?.role !== "assistant") return;
+  const msg = entry.message;
+  if (msg.model && msg.model !== "<synthetic>") {
+    acc.model = msg.provider ? `${msg.provider}/${msg.model}` : String(msg.model);
+  }
+  const u = msg.usage;
+  if (!u || typeof u !== "object") return;
+  const inp = Number(u.input) || 0;
+  const out = Number(u.output) || 0;
+  const cr = Number(u.cacheRead) || 0;
+  const cw = Number(u.cacheWrite) || 0;
+  const tok = Number(u.totalTokens) || (inp + out + cr + cw);
+  acc.totalTokens = (acc.totalTokens || 0) + tok;
+  const promptTok = Number(msg.contextSnapshot?.promptTokens) || (inp + cr + cw);
+  if (promptTok > 0) acc.contextTokens = promptTok;
+  let turnCost = typeof u.cost?.total === "number" && u.cost.total > 0 ? u.cost.total : 0;
+  if (!(turnCost > 0) && tok > 0) turnCost = estimateTurnCost(acc.model, inp, out, cr, cw);
+  acc.cost = (acc.cost || 0) + turnCost;
+}
+
+function noteClaudeUsage(acc, entry) {
+  if (entry.type === "ai-title" && entry.aiTitle) acc.title = entry.aiTitle;
+  if (entry.type === "assistant" && entry.message) {
+    const msg = entry.message;
+    const model = entry.requestedModel || msg.model;
+    if (model && model !== "<synthetic>") acc.model = String(model);
+    const u = msg.usage;
+    if (!u || typeof u !== "object") return;
+    const inp = Number(u.input_tokens) || 0;
+    const out = Number(u.output_tokens) || 0;
+    const cr = Number(u.cache_read_input_tokens) || 0;
+    const cw = Number(u.cache_creation_input_tokens) || 0;
+    const promptTok = inp + cr + cw;
+    if (promptTok > 0) acc.contextTokens = promptTok;
+    const tok = promptTok + out;
+    if (tok > 0) {
+      if (!acc.msgTokens) acc.msgTokens = new Map();
+      const id = msg.id || entry.uuid || `seq:${++acc.msgSeq}`;
+      acc.msgTokens.set(id, { model: acc.model, inp, out, cr, cw, tok });
+    }
+    return;
+  }
+  if (entry.type === "cost-state") {
+    if (typeof entry.totalCostUSD === "number" && entry.totalCostUSD > 0) acc.costStateUSD = entry.totalCostUSD;
+    let tot = 0;
+    let bestModel = "";
+    let bestTok = 0;
+    for (const [key, usage] of Object.entries(entry.modelUsage || {})) {
+      if (!usage || typeof usage !== "object") continue;
+      const mt = (Number(usage.inputTokens) || 0) + (Number(usage.outputTokens) || 0) + (Number(usage.cacheReadInputTokens) || 0) + (Number(usage.cacheCreationInputTokens) || 0);
+      tot += mt;
+      if (key && key !== "<synthetic>" && mt >= bestTok) {
+        bestTok = mt;
+        bestModel = key;
+      }
+    }
+    if (tot > 0) acc.costStateTokens = tot;
+    if (!acc.model && bestModel) acc.model = bestModel;
+  }
+}
+
+function resolveStats(acc) {
+  let msgTokSum = 0;
+  let msgCostSum = 0;
+  if (acc.msgTokens) {
+    for (const item of acc.msgTokens.values()) {
+      msgTokSum += item.tok;
+      msgCostSum += estimateTurnCost(item.model || acc.model, item.inp, item.out, item.cr, item.cw);
+    }
+  }
+  const totalTokens = Math.max(acc.totalTokens || 0, acc.costStateTokens || 0, msgTokSum);
+  const rawCost = acc.costStateUSD > 0 ? acc.costStateUSD : (acc.cost > 0 ? acc.cost : msgCostSum);
+  const spec = lookupModelSpec(acc.model);
+  return {
+    model: acc.model || "",
+    contextTokens: acc.contextTokens || 0,
+    contextWindow: spec.contextWindow || 0,
+    totalTokens,
+    cost: rawCost > 0 ? Number(rawCost.toFixed(6)) : 0,
+  };
+}
+
+function estimateTurnCost(model, input, output, cacheRead, cacheWrite) {
+  const spec = lookupModelSpec(model);
+  if (!spec.cost) return 0;
+  return (
+    (input || 0) * (spec.cost.input || 0) +
+    (output || 0) * (spec.cost.output || 0) +
+    (cacheRead || 0) * (spec.cost.cacheRead || 0) +
+    (cacheWrite || 0) * (spec.cost.cacheWrite || 0)
+  ) / 1_000_000;
+}
+
+function lookupModelSpec(model) {
+  if (!model || model === "<synthetic>") return { cost: null, contextWindow: 0 };
+  const catalog = loadModelCatalog();
+  const raw = String(model).trim();
+  const bare = raw.split("/").pop().replace(/\[[^\]]*\]$/, "");
+  const dotted = bare.replace(/(\d)p(\d)/g, "$1.$2");
+  const candidates = [raw, bare, bare.toLowerCase(), `${bare}-priority`, dotted, `${dotted}-priority`];
+  for (const key of candidates) {
+    const found = catalog.get(key) || catalog.get(key.toLowerCase());
+    if (found) return found;
+  }
+  if (/\[1m\]/i.test(raw)) return { cost: null, contextWindow: 1_000_000 };
+  if (/^claude-/i.test(bare)) return { cost: null, contextWindow: 200_000 };
+  return { cost: null, contextWindow: 0 };
+}
+
+function loadModelCatalog() {
+  const ymlPath = path.join(os.homedir(), ".omp", "agent", "models.yml");
+  let stat;
+  try {
+    stat = fs.statSync(ymlPath);
+  } catch {
+    return modelCatalogCache.map;
+  }
+  if (modelCatalogCache.mtimeMs === stat.mtimeMs) return modelCatalogCache.map;
+  const map = new Map();
+  try {
+    const text = fs.readFileSync(ymlPath, "utf8");
+    let entry = null;
+    let inCost = false;
+    let inLongContext = false;
+    for (const raw of text.split("\n")) {
+      const line = raw.replace(/#.*$/, "");
+      const idMatch = /^\s*-\s*id:\s*(\S+)/.exec(line);
+      if (idMatch) {
+        const id = idMatch[1].trim();
+        entry = { id, cost: null, contextWindow: 0 };
+        map.set(id, entry);
+        map.set(id.toLowerCase(), entry);
+        inCost = false;
+        inLongContext = false;
+        continue;
+      }
+      if (!entry) continue;
+      if (/^\s{8}cost:\s*$/.test(line)) {
+        entry.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+        inCost = true;
+        inLongContext = false;
+        continue;
+      }
+      if (inCost && /^\s{10}longContext:\s*$/.test(line)) {
+        inLongContext = true;
+        continue;
+      }
+      if (/^\s{8}[a-zA-Z]/.test(line)) {
+        inCost = false;
+        inLongContext = false;
+      }
+      if (inCost && !inLongContext && entry.cost) {
+        const rateMatch = /^\s{10}(input|output|cacheRead|cacheWrite):\s*([0-9.]+)/.exec(line);
+        if (rateMatch) entry.cost[rateMatch[1]] = Number(rateMatch[2]);
+      }
+      const cwMatch = /^\s{8}contextWindow:\s*(\d+)/.exec(line);
+      if (cwMatch) entry.contextWindow = Number(cwMatch[1]);
+    }
+  } catch {
+    // Keep empty map if models.yml cannot be read.
+  }
+  modelCatalogCache = { mtimeMs: stat.mtimeMs, map };
+  return map;
 }
 
 function readHeader(filePath, visit) {
@@ -766,6 +1036,10 @@ function conversationEntry(source, entry) {
   return false;
 }
 
+function hasOmpProcess(commands) {
+  return /^\s*(?:\/\S*\/)?omp(?:-[^\s/]+)?(?:\s|$)/m.test(String(commands || ""));
+}
+
 module.exports = {
   SOURCES,
   listSessions,
@@ -777,6 +1051,7 @@ module.exports = {
   ompRoots,
   hasConversationEntries,
   belongsToWorkspace,
+  hasOmpProcess,
 };
 
 if (require.main === module) {

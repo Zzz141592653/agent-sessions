@@ -156,8 +156,12 @@ button.badge { border: 0; }
   margin: 0 12px 8px;
 }
 .attention[hidden] { display: none; }
-.session .meta { color: var(--muted); font-size: 11px; }
-.session.selected .meta { color: inherit; opacity: 0.75; }
+.session .meta, .session .stats { color: var(--muted); font-size: 11px; }
+.session .stats {
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+.session.selected .meta, .session.selected .stats { color: inherit; opacity: 0.75; }
 .dot {
   display: inline-block;
   width: 6px;

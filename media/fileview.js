@@ -15,6 +15,8 @@ const bodyEl = document.getElementById("body");
 
 let pending = null;
 let reviewVersionId = "";
+let renderedFile = "";
+let renderedHtml = "";
 
 bindInputSelectAll();
 
@@ -32,6 +34,9 @@ window.addEventListener("message", (event) => {
   sendEl.disabled = !state.canSend;
   diffEl.disabled = !state.canDiff;
   reviewVersionId = state.versionId || "";
+  const previousScroll = docEl.scrollTop;
+  const sameFile = state.fileName === renderedFile;
+  const sameHtml = sameFile && state.html === renderedHtml;
   const keepDraft = !popover.hidden && pending;
   const draft = keepDraft ? bodyEl.value : "";
   const kept = keepDraft ? pending : null;
@@ -39,9 +44,15 @@ window.addEventListener("message", (event) => {
     hideMenu();
     hidePopover();
   }
-  docEl.innerHTML = state.html;
+  if (sameHtml) {
+    clearHighlights(docEl);
+  } else {
+    renderedFile = state.fileName || "";
+    renderedHtml = state.html || "";
+    docEl.innerHTML = state.html;
+  }
   const placed = highlight(docEl, state.comments);
-  renderDiagrams(docEl);
+  if (!sameHtml) renderDiagrams(docEl);
   renderComments(state.comments, placed);
   renderVersions(state);
   if (kept) {
@@ -56,6 +67,10 @@ window.addEventListener("message", (event) => {
   if (state.focusLine > 0) {
     const block = docEl.querySelector(`[data-start="${state.focusLine - 1}"]`);
     if (block) block.scrollIntoView({ block: "center" });
+  } else if (sameFile) {
+    docEl.scrollTop = previousScroll;
+  } else {
+    docEl.scrollTop = 0;
   }
 });
 
@@ -217,7 +232,9 @@ function save() {
 }
 
 function hidePopover(keepPending) {
+  const previousScroll = docEl.scrollTop;
   popover.hidden = true;
+  docEl.scrollTop = previousScroll;
   if (keepPending) return;
   pending = null;
   pendingQuote.textContent = "";
@@ -337,6 +354,16 @@ function highlight(root, comments) {
     if (paintLegacy(root, comment)) placed.add(comment.id);
   }
   return placed;
+}
+
+function clearHighlights(root) {
+  for (const mark of root.querySelectorAll("mark.comment-hit")) {
+    const parent = mark.parentNode;
+    if (!parent) continue;
+    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+    parent.removeChild(mark);
+    parent.normalize();
+  }
 }
 
 function blocksFor(root, comment) {
