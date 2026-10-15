@@ -1,7 +1,7 @@
 const vscode = acquireVsCodeApi();
 const PATH_SEGMENT = "(?:[A-Za-z0-9_]|\\.[A-Za-z0-9_])[A-Za-z0-9._+-]*";
 const RELATIVE_PATH = `(?<![\\w./])(?:\\.\\./|\\./)?(?:${PATH_SEGMENT}/)+${PATH_SEGMENT}\\.[A-Za-z0-9]{1,12}(?::\\d+){0,2}`;
-const ABSOLUTE_PATH = `(?<![\\w.])/(?:${PATH_SEGMENT}/)+${PATH_SEGMENT}`;
+const ABSOLUTE_PATH = `(?<![\\w.~])~?/(?:${PATH_SEGMENT}/)+${PATH_SEGMENT}(?::\\d+){0,2}`;
 const state = {
   sessions: [],
   source: "all",
@@ -891,8 +891,12 @@ function fileHref(raw) {
 }
 
 function homeDir() {
-  const match = /^\/(?:Users|home)\/[^/]+/.exec(sessionCwd());
-  return match ? match[0] : "";
+  const candidates = [sessionCwd(), ...state.sessions.map((item) => item.cwd || item.filePath || "")];
+  for (const candidate of candidates) {
+    const match = /^\/(?:Users|home)\/[^/]+/.exec(candidate);
+    if (match) return match[0];
+  }
+  return "";
 }
 
 function displayPath(raw, href) {
@@ -1182,12 +1186,12 @@ function formatMathInline(raw) {
 
 function appendInline(parent, rawText) {
   const text = formatMathInline(rawText);
-  const pattern = new RegExp("(<br\\s*\\/?>|`[^`\\n]+`|\\[[^\\[\\]\\n]+\\]\\([^)\\s]+\\)|\\*\\*(?:(?!\\*\\*)[^\\n])+\\*\\*|(?<!\\*)\\*[^*\\s\\n][^*\\n]*\\*(?!\\*)|https?:\\/\\/[^\\s<>]+|file:\\/\\/[^\\s<>]+|" + ABSOLUTE_PATH + "|" + RELATIVE_PATH + ")", "gi");
+  const pattern = new RegExp("(<br\\s*\\/?>|&lt;br\\s*\\/?&gt;|`[^`\\n]+`|\\[[^\\[\\]\\n]+\\]\\([^)\\s]+\\)|\\*\\*(?:(?!\\*\\*)[^\\n])+\\*\\*|(?<![\\w*])\\*[^*\\s\\n](?:(?!<br\\s*\\/?>)[^*\\n])*\\*(?![\\w*])|https?:\\/\\/[^\\s<>]+|file:\\/\\/[^\\s<>]+|" + ABSOLUTE_PATH + "|" + RELATIVE_PATH + ")", "gi");
   let cursor = 0;
   for (const match of text.matchAll(pattern)) {
     if (match.index > cursor) parent.append(document.createTextNode(text.slice(cursor, match.index)));
     const token = match[0];
-    if (/^<br\s*\/?>$/i.test(token)) {
+    if (/^(?:<br\s*\/?>|&lt;br\s*\/?&gt;)$/i.test(token)) {
       parent.append(document.createElement("br"));
     } else if (token.startsWith("`")) {
       const code = el("code");
@@ -1292,10 +1296,10 @@ function normalizeTarget(raw) {
   if (/^file:\/\/\S+$/i.test(href)) return href;
   if (href.startsWith("~/")) {
     const home = homeDir();
-    if (!home) return "";
+    if (!home) return href;
     const location = splitLocation(href.slice(2));
     const absolute = joinPath(home, location.file);
-    if (!absolute.startsWith("/")) return "";
+    if (!absolute.startsWith("/")) return href;
     if (!location.line) return absolute;
     return location.column > 1 || /:\d+:\d+$/.test(href) ? `${absolute}:${location.line}:${location.column}` : `${absolute}:${location.line}`;
   }

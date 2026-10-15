@@ -516,7 +516,7 @@ function renderMarkdown(source) {
   let map = null;
   const flush = () => {
     if (!buf.length) return;
-    const html = md.renderer.render(buf, md.options, {}).replace(/&lt;br\s*\/?&gt;/gi, "<br>");
+    const html = md.renderer.render(buf, md.options, {}).replace(/(<code\b[^>]*>[\s\S]*?<\/code>)|&lt;br\s*\/?&gt;/gi, (m, code) => code || "<br>");
     if (map) parts.push(`<section class="block md-block" data-start="${map[0]}" data-end="${map[1]}">${html}</section>`);
     else if (html.trim()) parts.push(`<section class="block md-block">${html}</section>`);
     buf = [];

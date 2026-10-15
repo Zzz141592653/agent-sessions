@@ -4,8 +4,21 @@
   --claude: #c2410c;
   --cursor: #2563eb;
   --line: var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.28)));
-  --muted: var(--vscode-descriptionForeground);
+  --fg: var(--vscode-editor-foreground, var(--vscode-foreground, #1e293b));
+  --muted: var(--vscode-descriptionForeground, #64748b);
   --soft: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+  --surface: color-mix(in srgb, var(--fg) 9%, var(--vscode-editor-background, #ffffff));
+  --border: color-mix(in srgb, var(--fg) 28%, var(--vscode-editor-background, #ffffff));
+  --accent: #0f766e;
+  --success: #16a34a;
+  --warning: #d97706;
+  --error: #dc2626;
+  --c1: #0d9488;
+  --c2: #2563eb;
+  --c3: #7c3aed;
+  --c4: #ea580c;
+  --c5: #16a34a;
+  --c6: #db2777;
 }
 * { box-sizing: border-box; }
 html, body {

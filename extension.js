@@ -1039,6 +1039,11 @@ function fileLocation(href) {
     file = vscode.Uri.parse(stripped.file).fsPath;
     line = stripped.line;
     column = stripped.column;
+  } else if (href.startsWith("~/")) {
+    const stripped = stripLineSuffix(path.join(os.homedir(), href.slice(2)));
+    file = stripped.file;
+    line = stripped.line;
+    column = stripped.column;
   } else if (isLocalPath(href)) {
     const stripped = stripLineSuffix(href);
     file = stripped.file;

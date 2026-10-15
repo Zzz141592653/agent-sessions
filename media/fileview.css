@@ -1,3 +1,21 @@
+:root {
+  color-scheme: light dark;
+  --fg: var(--vscode-editor-foreground, var(--vscode-foreground, #1e293b));
+  --muted: var(--vscode-descriptionForeground, #64748b);
+  --surface: color-mix(in srgb, var(--fg) 9%, var(--vscode-editor-background, #ffffff));
+  --border: color-mix(in srgb, var(--fg) 28%, var(--vscode-editor-background, #ffffff));
+  --accent: #0f766e;
+  --success: #16a34a;
+  --warning: #d97706;
+  --error: #dc2626;
+  --c1: #0d9488;
+  --c2: #2563eb;
+  --c3: #7c3aed;
+  --c4: #ea580c;
+  --c5: #16a34a;
+  --c6: #db2777;
+}
+
 body {
   margin: 0;
   height: 100vh;
