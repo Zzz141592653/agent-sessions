@@ -1,4 +1,4 @@
-# Agent Sessions
+# Claude Code & OMP GUI (Agent Sessions)
 
 Cursor extension. The command is "Sessions: Open Session Library". Version and publisher live in `package.json`.
 
@@ -52,4 +52,4 @@ A file comment belongs to one review of that file. The review closes when its co
 4. Install into local Cursor:
    `/Applications/Cursor.app/Contents/Resources/app/bin/cursor --install-extension agent-sessions-<version>.vsix --force`
    and copy updated runtime/media files into `~/.cursor/extensions/*agent-sessions*/` so active unpacked folders stay in sync.
-5. Push commits to `origin/main` and publish/update the GitHub release via `gh release create v<version> agent-sessions-<version>.vsix` (or `gh release upload v<version> ... --clobber`).
+5. Push commits to `origin/main`, publish/update the GitHub release via `gh release create v<version> agent-sessions-<version>.vsix` (or `gh release upload v<version> ... --clobber`), and publish to Open VSX via `npx ovsx publish agent-sessions-<version>.vsix -p "$(tr -d '[:space:]' < ~/open-vsx.token)"`.

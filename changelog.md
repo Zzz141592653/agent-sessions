@@ -1,9 +1,16 @@
+# 1.5.2
+
+Since 1.5.1.
+
+- Rename Marketplace display title to **Claude Code & OMP GUI — Sessions, Usage & Review**, add extension icon (`media/icon.png`), and add AI/Chat/Visualization categories and search keywords (`claude-code`, `omp`, `gui`, `usage`, `sessions`, `code-review`).
+- Update repository URLs to `Zzz141592653/claude-omp-gui`.
+
 # 1.5.1
 
 Since 1.5.0.
 
 - Add interactive zoom and pan to the full-screen diagram viewer (scroll/trackpad cursor-centered zoom from 25% to 800%, drag to pan, double-click zoom toggle, `−` / `100%` / `+` toolbar buttons, and `+` / `-` / `0` / `Esc` shortcuts).
-- Automatically render interactive SVG trend charts under numeric Markdown tables (with metric switcher tabs and full-screen zoom) and render `svg` code blocks inline in both the session thread and file comment view.
+- Render OMP's built-in table charts in session threads using OMP's own chart engine (`omp-charts.min.js`) and render `svg` code blocks inline in both the session thread and file comment view.
 - Overhaul Markdown and table typography in the file comment view and chat thread (full table borders, cell padding, zebra rows, heading hierarchy, inline code pills, blockquotes, and multi-level nested ordered/unordered lists).
 - Keep the mascot avatar vertically anchored when floating spend toasts appear or running status changes, and preserve `OMP` / `Claude` source tag colors on selected rows.
 

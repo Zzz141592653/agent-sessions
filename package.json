@@ -1,10 +1,11 @@
 {
   "name": "agent-sessions",
-  "displayName": "Agent Sessions",
-  "description": "Browse OMP and Claude Code sessions. Files opened from a session use the comment view.",
-  "version": "1.5.1",
+  "displayName": "Claude Code & OMP GUI — Sessions, Usage & Review",
+  "description": "GUI for Claude Code and OMP (Oh My Pi): live session browser, Today/Month token & spend tracker with mascot toasts, Mermaid/SVG/table chart viewer, and inline file review comments.",
+  "version": "1.5.2",
   "publisher": "jinxinyang",
   "license": "MIT",
+  "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -12,7 +13,26 @@
     "ui"
   ],
   "categories": [
+    "AI",
+    "Chat",
+    "Visualization",
     "Other"
+  ],
+  "keywords": [
+    "claude-code",
+    "claude",
+    "omp",
+    "oh-my-pi",
+    "gui",
+    "sessions",
+    "usage",
+    "cost",
+    "spend",
+    "code-review",
+    "dashboard",
+    "cursor",
+    "mermaid",
+    "agent"
   ],
   "activationEvents": [
     "onStartupFinished",
@@ -42,9 +62,13 @@
   "dependencies": {
     "markdown-it": "^14.3.2"
   },
+  "homepage": "https://github.com/Zzz141592653/claude-omp-gui#readme",
+  "bugs": {
+    "url": "https://github.com/Zzz141592653/claude-omp-gui/issues"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Zzz141592653/agent-sessions.git"
+    "url": "https://github.com/Zzz141592653/claude-omp-gui.git"
   },
   "scripts": {
     "test": "node --test",
