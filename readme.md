@@ -1,6 +1,6 @@
-# Agent Sessions
+# Claude Code & OMP GUI — Sessions, Usage & Review
 
-You leave a few coding agents running and come back to a row of terminals. Which one finished, which one is still working, and which window you should type into are all buried in those terminals. Agent Sessions is a Cursor panel that answers that from the sessions OMP and Claude Code already saved. Open it with **Sessions: Open Session Library**.
+You leave a few coding agents running and come back to a row of terminals. Which one finished, which one is still working, and which window you should type into are all buried in those terminals. **Claude Code & OMP GUI** (`jinxinyang.agent-sessions`) is a Cursor panel that answers that from the sessions OMP and Claude Code already saved. Open it with **Sessions: Open Session Library**.
 
 ## You come back and every terminal looks the same
 
@@ -22,6 +22,6 @@ Telling the agent "look at the file" leaves it to guess which sentence you mean.
 
 ## Install
 
-In Cursor, open Extensions and search for **Agent Sessions** (`jinxinyang.agent-sessions`). The listing is on [Open VSX](https://open-vsx.org/extension/jinxinyang/agent-sessions).
+In Cursor, open Extensions and search for **Claude Code & OMP GUI** (`jinxinyang.agent-sessions`). The listing is on [Open VSX](https://open-vsx.org/extension/jinxinyang/agent-sessions).
 
 To build from this repository, run `npm install` and then `npm run package`. Install that `.vsix` with **Extensions: Install from VSIX…**.
