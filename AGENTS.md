@@ -55,6 +55,4 @@ Every release ships to three targets: local Cursor, GitHub Releases (`Zzz1415926
    `/Applications/Cursor.app/Contents/Resources/app/bin/cursor --install-extension agent-sessions-<version>.vsix --force`
    and copy updated runtime/media files into `~/.cursor/extensions/*agent-sessions*/` so active unpacked folders stay in sync.
 5. Push commits to `origin/main` and publish the GitHub release via `gh release create v<version> agent-sessions-<version>.vsix` (or `gh release upload v<version> ... --clobber`).
-6. Publish to Open VSX (Cursor Marketplace) using the PAT in `~/open-vsx.token`:
-   `npx ovsx publish agent-sessions-<version>.vsix -p "$(tr -d '[:space:]' < ~/open-vsx.token)"`
-   and verify `curl -s "https://open-vsx.org/api/jinxinyang/agent-sessions" | jq -r .version` returns `<version>`, then delete the local `.vsix` artifact.
+6. Publish to Open VSX (Cursor Marketplace) via `npm run publish:ovsx` (reads `OVSX_PAT` or `~/open-vsx.token`), verify `curl -s "https://open-vsx.org/api/jinxinyang/agent-sessions" | jq -r .version` returns `<version>`, then delete the local `.vsix` artifact.

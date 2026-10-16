@@ -73,7 +73,7 @@
   "scripts": {
     "test": "node --test",
     "package": "vsce package",
-    "publish:ovsx": "npx ovsx publish -p \"$(tr -d '[:space:]' < ~/open-vsx.token)\""
+    "publish:ovsx": "npx ovsx publish -p \"${OVSX_PAT:-$(tr -d '[:space:]' < ~/open-vsx.token 2>/dev/null)}\""
   },
   "devDependencies": {
     "@vscode/vsce": "^3.9.2"
