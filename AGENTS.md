@@ -46,10 +46,15 @@ A file comment belongs to one review of that file. The review closes when its co
 
 ## Package, install, and release
 
+Every release ships to three targets: local Cursor, GitHub Releases (`Zzz141592653/claude-omp-gui`), and Open VSX (`jinxinyang.agent-sessions`).
+
 1. Run `npm test` (`node --test`).
 2. Update `docs/images/library.png` (`1280x800` @2x headless Chrome screenshot) if the library UI changed, and update `changelog.md` / `package.json` version when cutting a release.
 3. Run `npm run package` to build `agent-sessions-<version>.vsix` (keep `.vsix` out of git).
 4. Install into local Cursor:
    `/Applications/Cursor.app/Contents/Resources/app/bin/cursor --install-extension agent-sessions-<version>.vsix --force`
    and copy updated runtime/media files into `~/.cursor/extensions/*agent-sessions*/` so active unpacked folders stay in sync.
-5. Push commits to `origin/main`, publish/update the GitHub release via `gh release create v<version> agent-sessions-<version>.vsix` (or `gh release upload v<version> ... --clobber`), and publish to Open VSX via `npx ovsx publish agent-sessions-<version>.vsix -p "$(tr -d '[:space:]' < ~/open-vsx.token)"`.
+5. Push commits to `origin/main` and publish the GitHub release via `gh release create v<version> agent-sessions-<version>.vsix` (or `gh release upload v<version> ... --clobber`).
+6. Publish to Open VSX (Cursor Marketplace) using the PAT in `~/open-vsx.token`:
+   `npx ovsx publish agent-sessions-<version>.vsix -p "$(tr -d '[:space:]' < ~/open-vsx.token)"`
+   and verify `curl -s "https://open-vsx.org/api/jinxinyang/agent-sessions" | jq -r .version` returns `<version>`, then delete the local `.vsix` artifact.
