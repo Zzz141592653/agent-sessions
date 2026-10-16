@@ -48,8 +48,26 @@ button { cursor: pointer; }
   background: var(--vscode-sideBar-background);
   border-right: 1px solid var(--line);
 }
-.brand { padding: 16px 16px 8px; }
+.brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 12px 8px 16px;
+}
 .brand h1 { margin: 0; font-size: 13px; font-weight: 650; letter-spacing: 0.01em; }
+#speeds-btn {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 7px;
+  padding: 3px 9px;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+#speeds-btn:hover {
+  background: var(--soft);
+  color: var(--vscode-foreground);
+}
 .controls { display: flex; flex-direction: column; gap: 8px; padding: 4px 12px 10px; }
 .search-row { display: flex; gap: 6px; }
 .search-row input { flex: 1; min-width: 0; }
@@ -392,48 +410,7 @@ mark.hit.current { background: var(--vscode-editor-findMatchBackground, #f59e0b)
 .md pre.mermaid-error { outline: 1px solid var(--vscode-editorWarning-foreground, #f59e0b); }
 .md .mermaid { position: relative; margin: 10px 0 18px; }
 .md .mermaid svg { width: 100%; max-width: none; height: auto; display: block; }
-.md .table-chart {
-  position: relative;
-  margin: -4px 0 16px;
-  padding: 12px 14px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--vscode-foreground) 2%, transparent);
-}
-.table-chart-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-bottom: 6px;
-}
-.table-chart-caption {
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--vscode-foreground);
-}
-.table-chart-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-.table-chart-tab {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--muted);
-}
-.table-chart-tab.active {
-  color: #0d9488;
-  border-color: color-mix(in srgb, #0d9488 55%, var(--line));
-  background: color-mix(in srgb, #0d9488 12%, transparent);
-  font-weight: 600;
-}
-.table-chart-stage { position: relative; }
-.table-chart-stage svg { width: 100%; max-width: 680px; height: auto; display: block; }
+.md .table-chart { margin: -2px 0 16px; }
 .mermaid-zoom {
   position: absolute;
   top: 8px;
@@ -787,3 +764,123 @@ a.link {
   margin: 2px 4px;
   background: var(--line);
 }
+.speeds-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.speeds-modal[hidden] { display: none !important; }
+.speeds-card {
+  width: min(820px, 100%);
+  max-height: min(640px, 88vh);
+  display: flex;
+  flex-direction: column;
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.speeds-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.speeds-title-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.speeds-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+.speeds-sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+.speeds-close {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 7px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.speeds-close:hover {
+  background: var(--soft);
+  color: var(--vscode-foreground);
+}
+.speeds-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--vscode-sideBar-background);
+}
+.speeds-body {
+  flex: 1;
+  overflow: auto;
+  padding: 12px 20px 18px;
+}
+.speeds-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.speeds-table th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11.5px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.speeds-table td {
+  padding: 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+  vertical-align: middle;
+}
+.speeds-model {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.speeds-num {
+  white-space: nowrap;
+  color: var(--muted);
+}
+.speeds-tps-cell {
+  min-width: 170px;
+}
+.speeds-tps-val {
+  display: inline-block;
+  font-weight: 650;
+  margin-bottom: 3px;
+}
+.speeds-bar-wrap {
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--soft);
+  overflow: hidden;
+}
+.speeds-bar {
+  height: 100%;
+  border-radius: 999px;
+}
+.speeds-bar.omp { background: var(--omp); }
+.speeds-bar.claude { background: var(--claude); }

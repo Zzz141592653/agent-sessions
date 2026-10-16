@@ -24,7 +24,8 @@ const SOURCES = {
 };
 
 const headerCache = new Map();
-let modelCatalogCache = { mtimeMs: -1, map: new Map() };
+let ompCatalogCache = { mtimeMs: -1, map: new Map() };
+let claudeCatalogCache = { mtimeMs: -1, map: new Map() };
 
 const MARKER_ROLE_ASSISTANT = Buffer.from('"role":"assistant"');
 const MARKER_TYPE_ASSISTANT = Buffer.from('"type":"assistant"');
@@ -32,6 +33,7 @@ const MARKER_MODEL_CHANGE = Buffer.from('"model_change"');
 const MARKER_COST_STATE = Buffer.from('"cost-state"');
 const MARKER_TITLE = Buffer.from('"title');
 const MARKER_AI_TITLE = Buffer.from('"ai-title"');
+const MARKER_TURN_DURATION = Buffer.from('"turn_duration"');
 function listSessions(workspacePaths) {
   const folders = (workspacePaths || []).map((folder) => path.resolve(folder));
   const seen = new Set();
@@ -121,6 +123,11 @@ function refreshSessionMeta(session) {
   session.contextTokens = meta.contextTokens || 0;
   session.contextWindow = meta.contextWindow || 0;
   session.totalTokens = meta.totalTokens || 0;
+  session.outputTokens = meta.outputTokens || 0;
+  session.genMs = meta.genMs || 0;
+  session.tokPerSec = meta.tokPerSec || 0;
+  session.ttftCount = meta.ttftCount || 0;
+  session.avgTtftMs = meta.avgTtftMs || 0;
   session.cost = meta.cost || 0;
   session.todayCost = meta.todayCost || 0;
   session.monthCost = meta.monthCost || 0;
@@ -592,6 +599,11 @@ function summary(source, filePath, meta, folders) {
     contextTokens: meta.contextTokens || 0,
     contextWindow: meta.contextWindow || 0,
     totalTokens: meta.totalTokens || 0,
+    outputTokens: meta.outputTokens || 0,
+    genMs: meta.genMs || 0,
+    tokPerSec: meta.tokPerSec || 0,
+    ttftCount: meta.ttftCount || 0,
+    avgTtftMs: meta.avgTtftMs || 0,
     cost: meta.cost || 0,
     todayCost: meta.todayCost || 0,
     monthCost: meta.monthCost || 0,
@@ -611,14 +623,23 @@ function createUsageState() {
     sidechain: false,
     model: "",
     contextTokens: 0,
+    contextWindow: 0,
     totalTokens: 0,
+    outputTokens: 0,
+    genMs: 0,
+    ttftMs: 0,
+    ttftCount: 0,
     cost: 0,
     turnCosts: [],
     msgTokens: null,
     msgSeq: 0,
     costStateTokens: 0,
+    costStateOutputTokens: 0,
+    costStateApiMs: 0,
+    turnDurationMs: 0,
     costStateUSD: 0,
     costStateTs: 0,
+    claudeModelUsage: null,
   };
 }
 
@@ -677,7 +698,7 @@ function shouldParseMetaLine(source, lineBuf) {
     return lineBuf.includes(MARKER_ROLE_ASSISTANT) || lineBuf.includes(MARKER_MODEL_CHANGE) || lineBuf.includes(MARKER_TITLE);
   }
   if (source === "claude") {
-    return lineBuf.includes(MARKER_COST_STATE) || lineBuf.includes(MARKER_TYPE_ASSISTANT) || lineBuf.includes(MARKER_AI_TITLE);
+    return lineBuf.includes(MARKER_COST_STATE) || lineBuf.includes(MARKER_TYPE_ASSISTANT) || lineBuf.includes(MARKER_AI_TITLE) || lineBuf.includes(MARKER_TURN_DURATION);
   }
   return false;
 }
@@ -698,6 +719,16 @@ function noteOmpUsage(acc, entry) {
   const cw = Number(u.cacheWrite) || 0;
   const tok = Number(u.totalTokens) || (inp + out + cr + cw);
   acc.totalTokens = (acc.totalTokens || 0) + tok;
+  const dur = Number(msg.duration) || 0;
+  const ttft = Number(msg.ttft) || 0;
+  if (msg.stopReason !== "error" && out > 0 && dur > 0) {
+    acc.outputTokens = (acc.outputTokens || 0) + out;
+    acc.genMs = (acc.genMs || 0) + dur;
+    if (ttft > 0 && ttft < dur) {
+      acc.ttftMs = (acc.ttftMs || 0) + ttft;
+      acc.ttftCount = (acc.ttftCount || 0) + 1;
+    }
+  }
   const promptTok = Number(msg.contextSnapshot?.promptTokens) || (inp + cr + cw);
   if (promptTok > 0) acc.contextTokens = promptTok;
   let turnCost = typeof u.cost?.total === "number" && u.cost.total > 0 ? u.cost.total : 0;
@@ -728,28 +759,54 @@ function noteClaudeUsage(acc, entry) {
       const id = msg.id || entry.uuid || `seq:${++acc.msgSeq}`;
       const prev = acc.msgTokens.get(id);
       const ts = parseEntryTime(entry, msg) || prev?.ts || 0;
+      if (ts > 0) acc.costStateTs = ts;
       acc.msgTokens.set(id, { model: acc.model, inp, out, cr, cw, tok, ts });
     }
     return;
   }
+  if (entry.type === "system" && entry.subtype === "turn_duration") {
+    const dur = Number(entry.durationMs) || 0;
+    if (dur > 0) acc.turnDurationMs = (acc.turnDurationMs || 0) + dur;
+    return;
+  }
   if (entry.type === "cost-state") {
+    const entryTs = parseEntryTime(entry);
+    if (entryTs > 0) acc.costStateTs = entryTs;
     if (typeof entry.totalCostUSD === "number" && entry.totalCostUSD > 0) {
       acc.costStateUSD = entry.totalCostUSD;
-      acc.costStateTs = parseEntryTime(entry) || acc.costStateTs || 0;
     }
+    const apiMs = Number(entry.totalAPIDurationWithoutRetries) || Number(entry.totalAPIDuration) || 0;
+    if (apiMs > 0) acc.costStateApiMs = apiMs;
     let tot = 0;
+    let totOut = 0;
     let bestModel = "";
     let bestTok = 0;
+    if (!acc.claudeModelUsage) acc.claudeModelUsage = new Map();
     for (const [key, usage] of Object.entries(entry.modelUsage || {})) {
       if (!usage || typeof usage !== "object") continue;
-      const mt = (Number(usage.inputTokens) || 0) + (Number(usage.outputTokens) || 0) + (Number(usage.cacheReadInputTokens) || 0) + (Number(usage.cacheCreationInputTokens) || 0);
+      const inp = Number(usage.inputTokens) || 0;
+      const out = Number(usage.outputTokens) || 0;
+      const cr = Number(usage.cacheReadInputTokens) || 0;
+      const cw = Number(usage.cacheCreationInputTokens) || 0;
+      const mt = inp + out + cr + cw;
       tot += mt;
+      totOut += out;
+      const costUSD = typeof usage.costUSD === "number" && usage.costUSD > 0 ? usage.costUSD : 0;
+      const contextWindow = Number(usage.contextWindow) || (/\[1m\]/i.test(key) ? 1_000_000 : 0);
+      if (contextWindow > 0 && (!acc.contextWindow || key === acc.model)) {
+        acc.contextWindow = contextWindow;
+      }
+      const record = { inp, out, cr, cw, tok: mt, costUSD, contextWindow };
+      for (const candidate of modelCandidates(key)) {
+        acc.claudeModelUsage.set(candidate, record);
+      }
       if (key && key !== "<synthetic>" && mt >= bestTok) {
         bestTok = mt;
         bestModel = key;
       }
     }
     if (tot > 0) acc.costStateTokens = tot;
+    if (totOut > 0) acc.costStateOutputTokens = totOut;
     if (!acc.model && bestModel) acc.model = bestModel;
   }
 }
@@ -779,6 +836,7 @@ function resolveStats(acc, fallbackMtime) {
   const monthStart = currentMonthStart();
   const fallbackTs = fallbackMtime || 0;
   let msgTokSum = 0;
+  let msgOutSum = 0;
   let msgCostSum = 0;
   let todayWeight = 0;
   let monthWeight = 0;
@@ -787,9 +845,10 @@ function resolveStats(acc, fallbackMtime) {
   if (acc.msgTokens && acc.msgTokens.size > 0) {
     for (const item of acc.msgTokens.values()) {
       msgTokSum += item.tok;
-      const est = estimateTurnCost(item.model || acc.model, item.inp, item.out, item.cr, item.cw);
+      msgOutSum += item.out || 0;
+      const est = estimateTurnCost(item.model || acc.model, item.inp, item.out, item.cr, item.cw, acc.claudeModelUsage);
       msgCostSum += est;
-      const weight = est > 0 ? est : item.tok;
+      const weight = est > 0 ? est : weightedTokens(item.inp, item.out, item.cr, item.cw);
       const ts = item.ts || fallbackTs;
       totalWeight += weight;
       if (ts >= monthStart) monthWeight += weight;
@@ -798,6 +857,10 @@ function resolveStats(acc, fallbackMtime) {
     }
   }
   const totalTokens = Math.max(acc.totalTokens || 0, acc.costStateTokens || 0, msgTokSum);
+  const outputTokens = Math.max(acc.outputTokens || 0, acc.costStateOutputTokens || 0, msgOutSum);
+  const genMs = acc.genMs > 0 ? acc.genMs : (acc.costStateApiMs > 0 ? acc.costStateApiMs : (acc.turnDurationMs || 0));
+  const tokPerSec = outputTokens > 0 && genMs > 0 ? Number(((outputTokens * 1000) / genMs).toFixed(1)) : 0;
+  const avgTtftMs = acc.ttftCount > 0 ? Math.round(acc.ttftMs / acc.ttftCount) : 0;
   const rawCost = acc.costStateUSD > 0 ? acc.costStateUSD : (acc.cost > 0 ? acc.cost : msgCostSum);
   let todayCost = 0;
   let monthCost = 0;
@@ -834,11 +897,18 @@ function resolveStats(acc, fallbackMtime) {
     }
   }
   const spec = lookupModelSpec(acc.model);
+  const claudeUsage = lookupInMap(acc.claudeModelUsage, acc.model);
+  const contextWindow = claudeUsage?.contextWindow || acc.contextWindow || spec.contextWindow || 0;
   return {
     model: acc.model || "",
     contextTokens: acc.contextTokens || 0,
-    contextWindow: spec.contextWindow || 0,
+    contextWindow,
     totalTokens,
+    outputTokens,
+    genMs: Math.round(genMs),
+    tokPerSec,
+    ttftCount: acc.ttftCount || 0,
+    avgTtftMs,
     cost: rawCost > 0 ? Number(rawCost.toFixed(6)) : 0,
     todayCost: todayCost > 0 ? Number(todayCost.toFixed(6)) : 0,
     monthCost: monthCost > 0 ? Number(monthCost.toFixed(6)) : 0,
@@ -847,7 +917,19 @@ function resolveStats(acc, fallbackMtime) {
   };
 }
 
-function estimateTurnCost(model, input, output, cacheRead, cacheWrite) {
+function weightedTokens(input, output, cacheRead, cacheWrite) {
+  return (input || 0) + (output || 0) * 5 + (cacheRead || 0) * 0.1 + (cacheWrite || 0) * 1.25;
+}
+
+function estimateTurnCost(model, input, output, cacheRead, cacheWrite, claudeModelUsage) {
+  const claudeUsage = lookupInMap(claudeModelUsage, model);
+  if (claudeUsage && claudeUsage.costUSD > 0) {
+    const modelWeight = weightedTokens(claudeUsage.inp, claudeUsage.out, claudeUsage.cr, claudeUsage.cw);
+    const turnWeight = weightedTokens(input, output, cacheRead, cacheWrite);
+    if (modelWeight > 0 && turnWeight > 0) {
+      return claudeUsage.costUSD * (turnWeight / modelWeight);
+    }
+  }
   const spec = lookupModelSpec(model);
   if (!spec.cost) return 0;
   return (
@@ -858,31 +940,123 @@ function estimateTurnCost(model, input, output, cacheRead, cacheWrite) {
   ) / 1_000_000;
 }
 
-function lookupModelSpec(model) {
-  if (!model || model === "<synthetic>") return { cost: null, contextWindow: 0 };
-  const catalog = loadModelCatalog();
+function modelCandidates(model) {
+  if (!model || model === "<synthetic>") return [];
   const raw = String(model).trim();
-  const bare = raw.split("/").pop().replace(/\[[^\]]*\]$/, "");
+  const noBracket = raw.replace(/\[[^\]]*\]$/, "");
+  const bare = noBracket.split("/").pop();
   const dotted = bare.replace(/(\d)p(\d)/g, "$1.$2");
-  const candidates = [raw, bare, bare.toLowerCase(), `${bare}-priority`, dotted, `${dotted}-priority`];
-  for (const key of candidates) {
-    const found = catalog.get(key) || catalog.get(key.toLowerCase());
-    if (found) return found;
-  }
-  if (/\[1m\]/i.test(raw)) return { cost: null, contextWindow: 1_000_000 };
-  if (/^claude-/i.test(bare)) return { cost: null, contextWindow: 200_000 };
-  return { cost: null, contextWindow: 0 };
+  const pForm = bare.replace(/(\d)\.(\d)/g, "$1p$2");
+  const set = new Set([
+    raw,
+    raw.toLowerCase(),
+    noBracket,
+    noBracket.toLowerCase(),
+    bare,
+    bare.toLowerCase(),
+    `${bare}-priority`,
+    dotted,
+    dotted.toLowerCase(),
+    `${dotted}-priority`,
+    pForm,
+    pForm.toLowerCase(),
+  ]);
+  return [...set].filter(Boolean);
 }
 
-function loadModelCatalog() {
+function lookupInMap(map, model) {
+  if (!map || !map.size || !model) return null;
+  for (const key of modelCandidates(model)) {
+    const found = map.get(key);
+    if (found) return found;
+  }
+  return null;
+}
+
+function lookupModelSpec(model) {
+  if (!model || model === "<synthetic>") return { cost: null, contextWindow: 0 };
+  const raw = String(model).trim();
+  const bare = raw.split("/").pop().replace(/\[[^\]]*\]$/, "");
+  const claudeEntry = lookupInMap(loadClaudeCatalog(), raw);
+  const ompEntry = lookupInMap(loadOmpCatalog(), raw);
+  const cost = claudeEntry?.cost || ompEntry?.cost || null;
+  let contextWindow = claudeEntry?.contextWindow || ompEntry?.contextWindow || 0;
+  if (!contextWindow) {
+    if (/\[1m\]/i.test(raw)) contextWindow = 1_000_000;
+    else if (/^claude-/i.test(bare)) contextWindow = 200_000;
+  }
+  return { cost, contextWindow };
+}
+
+function loadClaudeCatalog() {
+  const settingsPath = path.join(os.homedir(), ".claude", "settings.json");
+  let stat;
+  try {
+    stat = fs.statSync(settingsPath);
+  } catch {
+    return claudeCatalogCache.map;
+  }
+  if (claudeCatalogCache.mtimeMs === stat.mtimeMs) return claudeCatalogCache.map;
+  const map = new Map();
+  try {
+    const parsed = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    const put = (id, spec) => {
+      for (const key of modelCandidates(id)) {
+        const prev = map.get(key);
+        map.set(key, {
+          id,
+          cost: spec.cost || prev?.cost || null,
+          contextWindow: spec.contextWindow || prev?.contextWindow || 0,
+        });
+      }
+    };
+    const multiplier = typeof parsed?.modelPricing?.multiplier === "number" && parsed.modelPricing.multiplier > 0
+      ? parsed.modelPricing.multiplier
+      : 1;
+    for (const [id, rate] of Object.entries(parsed?.modelPricing?.overrides || {})) {
+      if (!rate || typeof rate !== "object") continue;
+      const inp = (Number(rate.input) || 0) * multiplier;
+      const out = (Number(rate.output) || 0) * multiplier;
+      const cr = (Number(rate.cacheRead) || 0) * multiplier;
+      const cw = (Number(rate.cacheWrite) || 0) * multiplier;
+      if (inp > 0 || out > 0) {
+        put(id, { cost: { input: inp, output: out, cacheRead: cr, cacheWrite: cw }, contextWindow: 0 });
+      }
+    }
+    for (const opt of parsed?.modelPicker?.options || []) {
+      if (!opt || typeof opt !== "object" || !opt.model) continue;
+      const id = String(opt.model).trim();
+      const desc = `${opt.label || ""} ${opt.description || ""}`;
+      let contextWindow = 0;
+      if (/\[1m\]|\b1m\s+context\b/i.test(`${id} ${desc}`)) contextWindow = 1_000_000;
+      else if (/^claude-/i.test(String(opt.behavesAs || id))) contextWindow = 200_000;
+      let cost = null;
+      const priceMatch = /\$([0-9.]+)\s*\/\s*\$([0-9.]+)\s*(?:per\s*1m|\/\s*1m|per\s*mtok)/i.exec(desc);
+      if (priceMatch) {
+        const inp = Number(priceMatch[1]) * multiplier;
+        const out = Number(priceMatch[2]) * multiplier;
+        if (inp > 0 || out > 0) {
+          cost = { input: inp, output: out, cacheRead: inp * 0.1, cacheWrite: inp * 1.25 };
+        }
+      }
+      put(id, { cost, contextWindow });
+    }
+  } catch {
+    // Keep empty map if ~/.claude/settings.json cannot be read.
+  }
+  claudeCatalogCache = { mtimeMs: stat.mtimeMs, map };
+  return map;
+}
+
+function loadOmpCatalog() {
   const ymlPath = path.join(os.homedir(), ".omp", "agent", "models.yml");
   let stat;
   try {
     stat = fs.statSync(ymlPath);
   } catch {
-    return modelCatalogCache.map;
+    return ompCatalogCache.map;
   }
-  if (modelCatalogCache.mtimeMs === stat.mtimeMs) return modelCatalogCache.map;
+  if (ompCatalogCache.mtimeMs === stat.mtimeMs) return ompCatalogCache.map;
   const map = new Map();
   try {
     const text = fs.readFileSync(ymlPath, "utf8");
@@ -926,7 +1100,7 @@ function loadModelCatalog() {
   } catch {
     // Keep empty map if models.yml cannot be read.
   }
-  modelCatalogCache = { mtimeMs: stat.mtimeMs, map };
+  ompCatalogCache = { mtimeMs: stat.mtimeMs, map };
   return map;
 }
 
@@ -1161,6 +1335,10 @@ function hasOmpProcess(commands) {
   return /^\s*(?:\/\S*\/)?omp(?:-[^\s/]+)?(?:\s|$)/m.test(String(commands || ""));
 }
 
+function hasClaudeProcess(commands) {
+  return /^\s*(?:\/\S*\/)?claude(?:-[^\s/]+)?(?:\s|$)/m.test(String(commands || ""));
+}
+
 module.exports = {
   SOURCES,
   listSessions,
@@ -1174,6 +1352,7 @@ module.exports = {
   hasConversationEntries,
   belongsToWorkspace,
   hasOmpProcess,
+  hasClaudeProcess,
 };
 
 if (require.main === module) {

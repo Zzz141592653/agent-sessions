@@ -3,7 +3,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { hasConversationEntries, hasOmpProcess, loadTranscript } = require("../sources");
+const { hasConversationEntries, hasOmpProcess, hasClaudeProcess, loadTranscript } = require("../sources");
 
 test("a process exit record is not a new reply", () => {
   const entries = [
@@ -43,6 +43,13 @@ test("hasOmpProcess matches omp and custom omp-* binaries but not unrelated chil
   assert.equal(hasOmpProcess("-zsh\nnode /Users/me/.omp/plugins/start.mjs\n"), false);
 });
 
+test("hasClaudeProcess matches claude and custom claude-* binaries but not unrelated child commands", () => {
+  assert.equal(hasClaudeProcess("-zsh\nclaude\n"), true);
+  assert.equal(hasClaudeProcess("/Users/me/.local/bin/claude --resume d7461f7a-3215-47cd-876b-a36078b27e8e\n"), true);
+  assert.equal(hasClaudeProcess("claude-code --model claude-sonnet-4-6\n"), true);
+  assert.equal(hasClaudeProcess("-zsh\nnode /Users/me/.claude/plugins/cache/glean/mcp/start.mjs\n"), false);
+});
+
 test("loadTranscript extracts model, context tokens, total tokens, and cost for omp and claude", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-sessions-test-"));
   try {
@@ -62,6 +69,8 @@ test("loadTranscript extracts model, context tokens, total tokens, and cost for 
             provider: "vertex-proxy",
             model: "gemini-4-argon",
             content: [{ type: "text", text: "yesterday" }],
+            duration: 4000,
+            ttft: 1000,
             usage: { input: 1000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 1100, cost: { total: 0.12 } },
             contextSnapshot: { promptTokens: 1000 },
           },
@@ -74,6 +83,8 @@ test("loadTranscript extracts model, context tokens, total tokens, and cost for 
             provider: "vertex-proxy",
             model: "gemini-4-argon",
             content: [{ type: "text", text: "first" }],
+            duration: 6000,
+            ttft: 2000,
             usage: { input: 1000, output: 200, cacheRead: 4000, cacheWrite: 0, totalTokens: 5200, cost: { total: 0.05 } },
             contextSnapshot: { promptTokens: 5000 },
           },
@@ -94,6 +105,9 @@ test("loadTranscript extracts model, context tokens, total tokens, and cost for 
     assert.equal(ompTranscript.stats.model, "vertex-proxy/gemini-4-argon");
     assert.equal(ompTranscript.stats.contextTokens, 5000);
     assert.equal(ompTranscript.stats.totalTokens, 6300);
+    assert.equal(ompTranscript.stats.outputTokens, 300);
+    assert.equal(ompTranscript.stats.tokPerSec, 30);
+    assert.equal(ompTranscript.stats.avgTtftMs, 1500);
     assert.equal(ompTranscript.stats.cost, 0.17);
     assert.equal(ompTranscript.stats.todayCost, 0.05);
     const claudeFile = path.join(dir, "claude.jsonl");
@@ -123,6 +137,7 @@ test("loadTranscript extracts model, context tokens, total tokens, and cost for 
         JSON.stringify({
           type: "cost-state",
           totalCostUSD: 0.42,
+          totalAPIDurationWithoutRetries: 2500,
           modelUsage: {
             "glm-5.3": { inputTokens: 300, outputTokens: 100, cacheReadInputTokens: 1700, cacheCreationInputTokens: 0 },
           },
@@ -133,7 +148,74 @@ test("loadTranscript extracts model, context tokens, total tokens, and cost for 
     assert.equal(claudeTranscript.stats.model, "glm-5.3");
     assert.equal(claudeTranscript.stats.contextTokens, 2000);
     assert.equal(claudeTranscript.stats.totalTokens, 2100);
+    assert.equal(claudeTranscript.stats.outputTokens, 100);
+    assert.equal(claudeTranscript.stats.tokPerSec, 40);
     assert.equal(claudeTranscript.stats.cost, 0.42);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("claude sessions resolve per-turn todayCost and contextWindow from cost-state without omp models.yml", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-sessions-claude-only-"));
+  try {
+    const now = new Date();
+    const todayNoon = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12, 0, 0).toISOString();
+    const yesterdayNoon = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 12, 0, 0).toISOString();
+    const claudeFile = path.join(dir, "claude-only.jsonl");
+    fs.writeFileSync(
+      claudeFile,
+      [
+        JSON.stringify({
+          type: "assistant",
+          timestamp: yesterdayNoon,
+          requestedModel: "old-unlisted-model",
+          message: {
+            id: "msg_old",
+            model: "old-unlisted-model",
+            content: [{ type: "text", text: "yesterday reply" }],
+            usage: { input_tokens: 1000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 100 },
+          },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          timestamp: todayNoon,
+          requestedModel: "new-unlisted-model[1m]",
+          message: {
+            id: "msg_new",
+            model: "new-unlisted-model[1m]",
+            content: [{ type: "text", text: "today reply" }],
+            usage: { input_tokens: 2000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 200 },
+          },
+        }),
+        JSON.stringify({
+          type: "cost-state",
+          totalCostUSD: 0.35,
+          modelUsage: {
+            "old-unlisted-model": {
+              inputTokens: 1000,
+              outputTokens: 100,
+              cacheReadInputTokens: 0,
+              cacheCreationInputTokens: 0,
+              costUSD: 0.1,
+            },
+            "new-unlisted-model[1m]": {
+              inputTokens: 2000,
+              outputTokens: 200,
+              cacheReadInputTokens: 0,
+              cacheCreationInputTokens: 0,
+              costUSD: 0.25,
+            },
+          },
+        }),
+      ].join("\n") + "\n",
+    );
+    const transcript = loadTranscript(claudeFile, "claude");
+    assert.equal(transcript.stats.model, "new-unlisted-model[1m]");
+    assert.equal(transcript.stats.contextWindow, 1_000_000);
+    assert.equal(transcript.stats.cost, 0.35);
+    assert.equal(transcript.stats.todayCost, 0.25);
+    assert.deepEqual(transcript.stats.recentTurnCosts, [0.25]);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

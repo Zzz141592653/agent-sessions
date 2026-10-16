@@ -9,9 +9,9 @@ This directory is the source. Installed copies live under `~/.cursor/extensions/
 Read the file you are about to change. Runtime code is split like this:
 
 - `extension.js` — panel lifecycle, session list, activity state (`refreshSessionMeta` on `fs.watch` growth), replies, file diff, hide/Trash, mascot image picker (`mascotState`), and chat Mermaid script injection
-- `sources.js` — incremental `headerCache` and transcript reader for OMP and Claude Code jsonl files, file-diff builder, `hasOmpProcess` (matches `omp`, `omp-*` custom builds, and path-prefixed binaries), and per-session/per-turn usage stats (`model`, `contextTokens`, `contextWindow` from `~/.omp/agent/models.yml`, `totalTokens`, `cost`, `todayCost`, `monthCost`, `turnCount`, `recentTurnCosts`)
-- `review.js` — comment view for a file opened from a session, and `liveTty` + `pasteIntoTerminal` for OMP terminals
-- `media/panel.js` and `media/panel.css` — session-library webview: unified time-sorted session list with leading `OMP` / `Claude` tags, chat Markdown + `<br>` table + Mermaid rendering (`media/mermaid.min.js`), and the draggable floating mascot widget (`#mascot-dock`)
+- `sources.js` — incremental `headerCache` and transcript reader for OMP and Claude Code jsonl files, file-diff builder, `hasOmpProcess` / `hasClaudeProcess` (match `omp`/`claude`, `omp-*`/`claude-*` custom builds, and path-prefixed binaries), and per-session/per-turn usage & speed stats (`model`, `contextTokens`, `contextWindow`, `totalTokens`, `outputTokens`, `genMs`, `tokPerSec`, `ttftCount`, `avgTtftMs`, `cost`, `todayCost`, `monthCost`, `turnCount`, `recentTurnCosts`) resolved independently from OMP (`usage.cost`, `duration`, `ttft` + `~/.omp/agent/models.yml`) and Claude Code (`cost-state.modelUsage`, `totalAPIDurationWithoutRetries`, `turn_duration` + `~/.claude/settings.json`)
+- `review.js` — comment view for a file opened from a session, and `liveTty` + `pasteIntoTerminal` for both OMP and Claude Code terminals
+- `media/panel.js` and `media/panel.css` — session-library webview: unified time-sorted session list with leading `OMP` / `Claude` tags, `tok/s` speed display, Model Token Throughput comparison modal (`#speeds-modal`), chat Markdown + `<br>` table + chart + Mermaid rendering (`media/mermaid.min.js`, `media/omp-charts.min.js`), and the draggable floating mascot widget (`#mascot-dock`)
 - `media/mascot-omp.png`, `media/mascot-omp-idle.png`, `media/mascot-claude.png`, `media/mascot-claude-idle.png` — built-in thinking and idle expressions for OMP-tan and Claude-tan
 - `media/fileview.js` and `media/fileview.css` — file-comment webview (`clearHighlights` updates `<mark class="comment-hit">` in place and preserves `docEl.scrollTop` when HTML is unchanged)
 User-facing strings are English.
@@ -26,13 +26,20 @@ User-facing strings are English.
 
 The list marks `inWorkspace` when the session directory is the workspace directory or a directory inside it.
 
+
+## Dual-source parity (OMP & Claude Code)
+
+OMP and Claude Code are independent, equal peer sources. Every feature MUST work when only OMP is installed, when only Claude Code is installed, or when both are installed:
+
+- **Never couple one source to the other's local files**: Claude Code stats, pricing, and context windows must resolve from Claude's own `.jsonl` records (`cost-state.modelUsage`, `totalCostUSD`) and `~/.claude/settings.json` without requiring `~/.omp/agent/models.yml`; OMP sessions resolve from OMP `.jsonl` records and `~/.omp/agent/models.yml` without requiring `~/.claude`.
+- **Feature symmetry**: Chat rendering (Markdown tables, table charts, SVG, Mermaid), mascot `auto` selection, spend toasts, terminal replies, and file review comment sending must support both `omp` and `claude` sessions rather than hardcoding one source.
 ## Activity
 
 A session whose file is still growing is `running`. After the size stays quiet for `QUIET_MS` (15 seconds), a session whose tail is a reply and which the user does not have open becomes `fresh`. Growth that contains no conversation record, such as a process-exit line, stays seen. The open session updates incrementally and is not marked fresh. Hidden sessions that are `running` or `fresh` stay in the list. The activity filter is Any, New reply, or Running. The library scans about every 60 seconds and also watches jsonl files with `fs.watch`.
 
 ## Replies and comments
 
-The reply box and "Send to this turn" both call `pasteIntoTerminal`: find the live TTY for that OMP session and paste the text there. Claude and Cursor sessions have no such path.
+The reply box and "Send to this turn" both call `pasteIntoTerminal`: find the live TTY (`liveTty`) for that OMP or Claude Code session and paste the text there. Cursor sessions have no such path.
 
 A file comment belongs to one review of that file. The review closes when its comments are sent, and also when the file is opened again after the text has changed. The next review starts with no comments. Sending pastes only the open review. An earlier review keeps its comments and the file text from that review.
 

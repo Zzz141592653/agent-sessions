@@ -1,3 +1,11 @@
+# 1.5.3
+
+Since 1.5.2.
+
+- Track and display model token throughput (`tok/s`) and average TTFT per session in the session list, thread header, and hover tooltips for both OMP and Claude Code.
+- Add a **Speeds** comparison modal (accessible from the sidebar header and mascot menu) ranking all models by weighted `tok/s`, average TTFT, output tokens, session count, and cost across OMP and Claude Code.
+- Ensure full dual-source independence between OMP and Claude Code: resolve Claude Code per-turn costs and context windows natively from `cost-state.modelUsage` and `~/.claude/settings.json` without requiring `~/.omp/agent/models.yml`, support terminal replies and file review comment sending for live Claude Code sessions (`liveTty`), enable Markdown table charts for Claude Code threads, and respect workspace scope in mascot `auto` mode.
+
 # 1.5.2
 
 Since 1.5.1.

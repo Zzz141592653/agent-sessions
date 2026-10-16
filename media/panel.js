@@ -17,6 +17,9 @@ const state = {
   diffMode: "split",
   diffData: null,
   showHidden: false,
+  speedsOpen: false,
+  speedsSource: "all",
+  speedsScope: "all",
   mascot: {
     ompSrc: "",
     ompIdleSrc: "",
@@ -53,6 +56,8 @@ const replySend = document.querySelector("#reply-send");
 const mascotDock = document.querySelector("#mascot-dock");
 const mascotMenu = document.querySelector("#mascot-menu");
 const diagramEl = document.querySelector("#diagram");
+const speedsModal = document.querySelector("#speeds-modal");
+document.querySelector("#speeds-btn")?.addEventListener("click", () => openSpeedsModal());
 const diagramStage = document.querySelector("#diagram-stage");
 const diagramZoomReset = document.querySelector("#diagram-zoom-reset");
 const diagramView = { scale: 1, x: 0, y: 0, canvas: null, drag: null };
@@ -130,6 +135,7 @@ window.addEventListener("message", (event) => {
   if (message.type === "sessions") {
     state.sessions = message.sessions;
     renderList();
+    if (state.speedsOpen) renderSpeedsModal();
     return;
   }
   if (message.type === "transcript") {
@@ -291,7 +297,9 @@ function sendReply() {
   if (!text || !state.canReply || state.replying) return;
   state.replying = true;
   updateReply();
-  replyNotice.textContent = "Sending to the open OMP window…";
+  const selected = state.sessions.find((item) => item.key === state.selected);
+  const label = selected?.sourceLabel || (selected?.source === "claude" ? "Claude Code" : "OMP");
+  replyNotice.textContent = `Sending to the open ${label} window…`;
   vscode.postMessage({ type: "reply", text });
 }
 
@@ -438,6 +446,8 @@ function applyMeta() {
   if (session.project) parts.push(session.project);
   const model = shortModel(stats?.model || session.model);
   if (model) parts.push(model);
+  const tps = formatTokPerSec(stats?.tokPerSec ?? session.tokPerSec);
+  if (tps) parts.push(tps);
   const ctx = formatContextUsage(stats?.contextTokens ?? session.contextTokens, stats?.contextWindow ?? session.contextWindow, true);
   if (ctx) parts.push(ctx);
   const tok = formatCompactTokens(stats?.totalTokens ?? session.totalTokens);
@@ -457,6 +467,7 @@ function syncSessionStats(key, stats) {
     session.model !== stats.model ||
     session.contextTokens !== stats.contextTokens ||
     session.totalTokens !== stats.totalTokens ||
+    session.tokPerSec !== stats.tokPerSec ||
     session.cost !== stats.cost ||
     session.todayCost !== stats.todayCost ||
     session.monthCost !== stats.monthCost ||
@@ -501,11 +512,26 @@ function formatUSD(cost) {
   if (n < 0.01) return `$${n.toFixed(3)}`;
   return `$${n.toFixed(2)}`;
 }
+function formatTokPerSec(tokPerSec) {
+  const n = Number(tokPerSec) || 0;
+  if (n <= 0) return "";
+  return `${n >= 100 ? n.toFixed(0) : n.toFixed(1)} tok/s`;
+}
+
+function formatTtft(ms) {
+  const n = Number(ms) || 0;
+  if (n <= 0) return "";
+  if (n < 1000) return `${Math.round(n)}ms`;
+  return `${(n / 1000).toFixed(1)}s`;
+}
+
 
 function formatSessionRowStats(session) {
   const parts = [];
   const model = shortModel(session.model);
   if (model) parts.push(model);
+  const tps = formatTokPerSec(session.tokPerSec);
+  if (tps) parts.push(tps);
   const ctx = formatContextUsage(session.contextTokens, session.contextWindow, false);
   if (ctx) parts.push(ctx);
   const tok = formatCompactTokens(session.totalTokens);
@@ -518,6 +544,13 @@ function formatSessionRowStats(session) {
 function formatSessionStatsTooltip(session) {
   const lines = [];
   if (session.model) lines.push(`Model: ${session.model}`);
+  if (session.tokPerSec > 0) {
+    const outInfo = session.outputTokens > 0 ? ` (${session.outputTokens.toLocaleString()} output tok)` : "";
+    lines.push(`Throughput: ${session.tokPerSec.toFixed(1)} tok/s${outInfo}`);
+  }
+  if (session.avgTtftMs > 0) {
+    lines.push(`Avg TTFT: ${formatTtft(session.avgTtftMs)}`);
+  }
   if (session.contextTokens > 0) {
     const win = session.contextWindow > 0
       ? ` / ${session.contextWindow.toLocaleString()} (${Math.round((session.contextTokens / session.contextWindow) * 100)}%)`
@@ -1119,7 +1152,8 @@ function isTableStart(lines, index) {
 function renderTable(parent, lines, index) {
   const table = el("table");
   const head = el("tr");
-  for (const cell of splitRow(lines[index])) {
+  const rawHeader = splitRow(lines[index]);
+  for (const cell of rawHeader) {
     const th = el("th");
     appendInline(th, cell);
     head.append(th);
@@ -1127,13 +1161,16 @@ function renderTable(parent, lines, index) {
   table.append(head);
   index += 2;
   let rows = 0;
+  const rawRows = [];
   while (index < lines.length && lines[index].includes("|") && rows < 250) {
     if (/^\s*\|?\s*:?-{3,}/.test(lines[index])) {
       index += 1;
       continue;
     }
     const tr = el("tr");
-    for (const cell of splitRow(lines[index])) {
+    const rowCells = splitRow(lines[index]);
+    rawRows.push(rowCells);
+    for (const cell of rowCells) {
       const td = el("td");
       appendInline(td, cell);
       tr.append(td);
@@ -1142,6 +1179,7 @@ function renderTable(parent, lines, index) {
     index += 1;
     rows += 1;
   }
+  table._rawTable = { header: rawHeader, rows: rawRows };
   parent.append(table);
   return index;
 }
@@ -1503,7 +1541,11 @@ function visibleMascotSources() {
   const selected = state.sessions.find((item) => item.key === state.selected);
   if (selected && (selected.source === "omp" || selected.source === "claude")) return [selected.source];
   if (state.source === "omp" || state.source === "claude") return [state.source];
-  return [state.sessions[0]?.source === "claude" ? "claude" : "omp"];
+  const scoped = state.scope === "workspace"
+    ? state.sessions.filter((item) => item.inWorkspace)
+    : state.sessions;
+  const pool = scoped.length ? scoped : state.sessions;
+  return [pool[0]?.source === "claude" ? "claude" : "omp"];
 }
 
 function formatSpendAmount(amount) {
@@ -1742,142 +1784,33 @@ function renderDiagrams(root) {
   });
 }
 
-let chartSeq = 0;
-
-function shortCategoryLabel(raw) {
-  const base = String(raw || "").replace(/\s*[（(].*$/, "").trim() || String(raw || "").trim();
-  return base.length > 18 ? `${base.slice(0, 16)}…` : base;
-}
-
-function parseMetricCell(cellEl) {
-  if (!cellEl || cellEl.querySelector("br")) return null;
-  const raw = (cellEl.textContent || "").trim();
-  const stripped = raw.replace(/\s*[（(][^）)]*[）)]\s*$/g, "").trim();
-  const match = /^([+-]?\d[\d,]*(?:\.\d+)?)\s*([%a-zA-Z\u4e00-\u9fa5/]{0,6})$/.exec(stripped);
-  if (!match) return null;
-  const value = Number(match[1].replace(/,/g, ""));
-  if (!Number.isFinite(value) || value < 0) return null;
-  const unit = match[2] ? (match[1].length + match[2].length === stripped.length ? match[2] : ` ${match[2]}`) : "";
-  return { value, unit, display: stripped };
-}
-
-function extractTableSeries(table) {
-  const allRows = [...table.querySelectorAll("tr")];
-  if (allRows.length < 4 || allRows.length > 25) return null;
-  const headers = [...allRows[0].querySelectorAll("th, td")].map((c) => (c.textContent || "").trim());
-  const bodyRows = allRows.slice(1).filter((tr) => tr.querySelector("td"));
-  if (headers.length < 2 || bodyRows.length < 3) return null;
-  const labels = bodyRows.map((tr) => shortCategoryLabel(tr.querySelector("td")?.textContent || ""));
-  const series = [];
-  for (let col = 1; col < headers.length; col += 1) {
-    const points = [];
-    let ok = true;
-    for (let r = 0; r < bodyRows.length; r += 1) {
-      const cells = bodyRows[r].querySelectorAll("td");
-      const parsed = parseMetricCell(cells[col]);
-      if (!parsed) {
-        ok = false;
-        break;
-      }
-      points.push({ label: labels[r], ...parsed });
-    }
-    if (!ok) continue;
-    const vals = points.map((p) => p.value);
-    const min = Math.min(...vals);
-    const max = Math.max(...vals);
-    if (!(max > min)) continue;
-    const title = headers[col].replace(/\s*[（(].*$/, "").trim() || headers[col];
-    series.push({ title, unit: points[0].unit, points, max });
-  }
-  return series.length ? series : null;
-}
-
 function renderTableCharts(root) {
+  if (!window.ompCharts || typeof window.ompCharts.renderTableChart !== "function") return;
   const tables = [...root.querySelectorAll("table")];
   for (const table of tables) {
     if (table.dataset.chartRendered === "1") continue;
     table.dataset.chartRendered = "1";
-    const seriesList = extractTableSeries(table);
-    if (!seriesList) continue;
-    const box = el("div", "table-chart");
-    const head = el("div", "table-chart-head");
-    const caption = el("div", "table-chart-caption");
-    head.append(caption);
-    const stage = el("div", "table-chart-stage");
-    const selectSeries = (idx) => {
-      const s = seriesList[idx] || seriesList[0];
-      let peak = s.points[0];
-      for (const p of s.points) if (p.value > peak.value) peak = p;
-      caption.textContent = `${s.title} peaked at ${peak.display} in ${peak.label}`;
-      stage.innerHTML = buildTableChartSvg(s, ++chartSeq);
-    };
-    if (seriesList.length > 1) {
-      const tabs = el("div", "table-chart-tabs");
-      seriesList.forEach((s, idx) => {
-        const btn = el("button", `table-chart-tab${idx === 0 ? " active" : ""}`, s.title);
-        btn.type = "button";
-        btn.addEventListener("click", () => {
-          [...tabs.children].forEach((c, i) => c.classList.toggle("active", i === idx));
-          selectSeries(idx);
-        });
-        tabs.append(btn);
-      });
-      head.append(tabs);
-    }
-    selectSeries(0);
-    attachZoomButton(box, () => stage.querySelector("svg"));
-    box.append(head, stage);
-    table.after(box);
+    const raw = table._rawTable;
+    const header = raw
+      ? raw.header
+      : [...(table.querySelector("tr")?.querySelectorAll("th, td") || [])].map((c) => (c.textContent || "").trim());
+    const rows = raw
+      ? raw.rows
+      : [...table.querySelectorAll("tr")].slice(1).map((tr) => [...tr.querySelectorAll("td")].map((c) => (c.textContent || "").trim()));
+    if (!header.length || !rows.length) continue;
+    const chart = window.ompCharts.renderTableChart(header, rows);
+    if (!chart || !chart.svg) continue;
+    const host = el("div", "mermaid table-chart");
+    host.innerHTML = chart.svg;
+    const svg = host.querySelector("svg");
+    if (!svg) continue;
+    svg.removeAttribute("height");
+    svg.style.width = "100%";
+    svg.style.height = "auto";
+    svg.style.maxWidth = `${chart.width || 720}px`;
+    attachZoomButton(host, svg);
+    table.after(host);
   }
-}
-
-function formatAxisTick(val, unit) {
-  if (val === 0) return `0${unit.trim()}`;
-  const num = val >= 100 ? Math.round(val).toLocaleString("en-US") : Number(val.toPrecision(3));
-  return `${num}${unit}`;
-}
-
-function buildTableChartSvg(series, seq) {
-  const W = 580;
-  const H = 195;
-  const padL = 56;
-  const padR = 54;
-  const padT = 26;
-  const padB = 30;
-  const plotW = W - padL - padR;
-  const plotH = H - padT - padB;
-  const topVal = (series.max || 1) * 1.1;
-  const pts = series.points.map((p, i) => {
-    const x = padL + (series.points.length === 1 ? plotW / 2 : (i / (series.points.length - 1)) * plotW);
-    const y = padT + plotH - (p.value / topVal) * plotH;
-    return { x, y, ...p };
-  });
-  let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
-  for (let i = 0; i < pts.length - 1; i += 1) {
-    const p0 = pts[i];
-    const p1 = pts[i + 1];
-    const cx = ((p0.x + p1.x) / 2).toFixed(1);
-    d += ` C ${cx} ${p0.y.toFixed(1)}, ${cx} ${p1.y.toFixed(1)}, ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`;
-  }
-  const areaD = `${d} L ${pts[pts.length - 1].x.toFixed(1)} ${(padT + plotH).toFixed(1)} L ${pts[0].x.toFixed(1)} ${(padT + plotH).toFixed(1)} Z`;
-  let peakIdx = 0;
-  for (let i = 1; i < pts.length; i += 1) if (pts[i].value > pts[peakIdx].value) peakIdx = i;
-  const grids = [];
-  for (let g = 0; g <= 4; g += 1) {
-    const ratio = g / 4;
-    const y = (padT + plotH - ratio * plotH).toFixed(1);
-    const label = formatAxisTick(topVal * ratio, series.unit);
-    grids.push(`<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="currentColor" stroke-opacity="0.12" stroke-width="1"/>`);
-    grids.push(`<text x="${padL - 8}" y="${(Number(y) + 3.5).toFixed(1)}" text-anchor="end" font-size="10" fill="currentColor" fill-opacity="0.55">${label}</text>`);
-  }
-  const xLabels = pts.map((p) => `<text x="${p.x.toFixed(1)}" y="${H - 8}" text-anchor="middle" font-size="10.5" fill="currentColor" fill-opacity="0.65">${p.label}</text>`).join("");
-  const dots = pts.map((p) => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" fill="#0d9488"/>`).join("");
-  const peak = pts[peakIdx];
-  const peakCallout = `<line x1="${peak.x.toFixed(1)}" y1="${(peak.y - 4).toFixed(1)}" x2="${peak.x.toFixed(1)}" y2="${(peak.y - 12).toFixed(1)}" stroke="currentColor" stroke-opacity="0.45" stroke-width="1"/><text x="${peak.x.toFixed(1)}" y="${(peak.y - 15).toFixed(1)}" text-anchor="middle" font-size="10.5" font-weight="700" fill="currentColor">peak ${peak.display}</text>`;
-  const last = pts[pts.length - 1];
-  const endLabel = peakIdx === pts.length - 1 ? "" : `<text x="${(last.x + 7).toFixed(1)}" y="${(last.y + 3.5).toFixed(1)}" text-anchor="start" font-size="10.5" font-weight="700" fill="#0d9488">${last.display}</text>`;
-  const gradId = `tcGrad_${seq}`;
-  return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#0d9488" stop-opacity="0.24"/><stop offset="100%" stop-color="#0d9488" stop-opacity="0.01"/></linearGradient></defs>${grids.join("")}<path d="${areaD}" fill="url(#${gradId})"/><path d="${d}" fill="none" stroke="#0d9488" stroke-width="2" stroke-linecap="round"/>${dots}${peakCallout}${endLabel}${xLabels}</svg>`;
 }
 
 function applyDiagramTransform() {
@@ -2056,6 +1989,14 @@ function openMascotMenu(clientX, clientY) {
     mascotMenu.append(btn);
   }
   mascotMenu.append(el("div", "mascot-menu-sep"));
+  const speedsBtn = el("button", "mascot-menu-item", "Model token speeds…");
+  speedsBtn.type = "button";
+  speedsBtn.addEventListener("click", () => {
+    closeMascotMenu();
+    openSpeedsModal();
+  });
+  mascotMenu.append(speedsBtn);
+  mascotMenu.append(el("div", "mascot-menu-sep"));
   const pickClaude = el("button", "mascot-menu-item", "Custom Claude image…");
   pickClaude.type = "button";
   pickClaude.addEventListener("click", () => {
@@ -2157,3 +2098,160 @@ function bindMascotWidget() {
     }
   });
 }
+
+function openSpeedsModal() {
+  if (!speedsModal) return;
+  state.speedsOpen = true;
+  speedsModal.hidden = false;
+  renderSpeedsModal();
+}
+
+function closeSpeedsModal() {
+  if (!speedsModal) return;
+  state.speedsOpen = false;
+  speedsModal.hidden = true;
+  speedsModal.replaceChildren();
+}
+
+function aggregateModelSpeeds() {
+  const groups = new Map();
+  for (const session of state.sessions) {
+    if (state.speedsSource !== "all" && session.source !== state.speedsSource) continue;
+    if (state.speedsScope === "workspace" && !session.inWorkspace) continue;
+    const model = shortModel(session.model);
+    if (!model) continue;
+    const key = `${session.source}:${model.toLowerCase()}`;
+    let row = groups.get(key);
+    if (!row) {
+      row = {
+        key,
+        source: session.source,
+        sourceLabel: session.source === "omp" ? "OMP" : "Claude",
+        model,
+        sessions: 0,
+        outputTokens: 0,
+        genMs: 0,
+        ttftWeightedMs: 0,
+        ttftSamples: 0,
+        totalTokens: 0,
+        cost: 0,
+      };
+      groups.set(key, row);
+    }
+    row.sessions += 1;
+    row.totalTokens += Number(session.totalTokens) || 0;
+    row.cost += Number(session.cost) || 0;
+    const out = Number(session.outputTokens) || 0;
+    const ms = Number(session.genMs) || 0;
+    if (out > 0 && ms > 0) {
+      row.outputTokens += out;
+      row.genMs += ms;
+    }
+    const ttftCount = Number(session.ttftCount) || 0;
+    const avgTtft = Number(session.avgTtftMs) || 0;
+    if (ttftCount > 0 && avgTtft > 0) {
+      row.ttftSamples += ttftCount;
+      row.ttftWeightedMs += avgTtft * ttftCount;
+    }
+  }
+  const list = [...groups.values()].map((row) => ({
+    ...row,
+    tokPerSec: row.outputTokens > 0 && row.genMs > 0 ? (row.outputTokens * 1000) / row.genMs : 0,
+    avgTtftMs: row.ttftSamples > 0 ? Math.round(row.ttftWeightedMs / row.ttftSamples) : 0,
+  }));
+  list.sort((a, b) => (b.tokPerSec - a.tokPerSec) || (b.totalTokens - a.totalTokens));
+  return list;
+}
+
+function renderSpeedsModal() {
+  if (!speedsModal || !state.speedsOpen) return;
+  const rows = aggregateModelSpeeds();
+  const maxTps = rows.reduce((max, item) => Math.max(max, item.tokPerSec), 0) || 1;
+
+  const card = el("div", "speeds-card");
+  card.addEventListener("click", (event) => event.stopPropagation());
+
+  const head = el("div", "speeds-head");
+  const titleWrap = el("div", "speeds-title-wrap");
+  titleWrap.append(
+    el("h3", "speeds-title", "Model Token Throughput"),
+    el("span", "speeds-sub", "Weighted output tokens ÷ API generation time across local sessions"),
+  );
+  const closeBtn = el("button", "speeds-close", "Close");
+  closeBtn.type = "button";
+  closeBtn.addEventListener("click", closeSpeedsModal);
+  head.append(titleWrap, closeBtn);
+
+  const toolbar = el("div", "speeds-toolbar");
+  const sourceGroup = el("div", "chips");
+  for (const [id, label] of [["all", "All"], ["omp", "OMP"], ["claude", "Claude Code"]]) {
+    const btn = el("button", `chip${state.speedsSource === id ? " active" : ""}`, label);
+    btn.type = "button";
+    btn.addEventListener("click", () => {
+      state.speedsSource = id;
+      renderSpeedsModal();
+    });
+    sourceGroup.append(btn);
+  }
+  const scopeGroup = el("div", "chips");
+  for (const [id, label] of [["all", "All workspaces"], ["workspace", "This workspace"]]) {
+    const btn = el("button", `scope${state.speedsScope === id ? " active" : ""}`, label);
+    btn.type = "button";
+    btn.addEventListener("click", () => {
+      state.speedsScope = id;
+      renderSpeedsModal();
+    });
+    scopeGroup.append(btn);
+  }
+  toolbar.append(sourceGroup, scopeGroup);
+
+  const body = el("div", "speeds-body");
+  if (!rows.length) {
+    body.append(el("div", "empty", "No model usage data found for this filter."));
+  } else {
+    const table = el("table", "speeds-table");
+    const thead = el("thead");
+    const trHead = el("tr");
+    for (const h of ["Model", "Source", "Throughput (tok/s)", "Avg TTFT", "Output Tok", "Sessions", "Cost"]) {
+      trHead.append(el("th", "", h));
+    }
+    thead.append(trHead);
+    const tbody = el("tbody");
+    for (const row of rows) {
+      const tr = el("tr");
+      const tdModel = el("td", "speeds-model", row.model);
+      const tdSource = el("td");
+      tdSource.append(el("span", `source-tag ${row.source}`, row.sourceLabel));
+      const tdTps = el("td", "speeds-tps-cell");
+      if (row.tokPerSec > 0) {
+        const barWrap = el("div", "speeds-bar-wrap");
+        const bar = el("div", `speeds-bar ${row.source}`);
+        bar.style.width = `${Math.max(4, Math.round((row.tokPerSec / maxTps) * 100))}%`;
+        barWrap.append(bar);
+        const val = el("span", "speeds-tps-val", `${row.tokPerSec.toFixed(1)} tok/s`);
+        tdTps.append(val, barWrap);
+      } else {
+        tdTps.textContent = "—";
+      }
+      const tdTtft = el("td", "speeds-num", row.avgTtftMs > 0 ? formatTtft(row.avgTtftMs) : "—");
+      const tdOut = el("td", "speeds-num", formatCompactTokens(row.outputTokens) || "—");
+      const tdSessions = el("td", "speeds-num", String(row.sessions));
+      const tdCost = el("td", "speeds-num", formatUSD(row.cost) || "—");
+      tr.append(tdModel, tdSource, tdTps, tdTtft, tdOut, tdSessions, tdCost);
+      tbody.append(tr);
+    }
+    table.append(thead, tbody);
+    body.append(table);
+  }
+
+  card.append(head, toolbar, body);
+  speedsModal.replaceChildren(card);
+}
+
+speedsModal?.addEventListener("click", closeSpeedsModal);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.speedsOpen) {
+    event.preventDefault();
+    closeSpeedsModal();
+  }
+});

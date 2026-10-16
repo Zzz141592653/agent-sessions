@@ -3,7 +3,7 @@ const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const vscode = require("vscode");
-const { listSessions, refreshSessionMeta, createTranscriptReader, readTranscript, snapshotTranscript, buildFileDiff, ompRoots, hasConversationEntries } = require("./sources");
+const { listSessions, refreshSessionMeta, createTranscriptReader, readTranscript, snapshotTranscript, buildFileDiff, ompRoots, hasConversationEntries, hasClaudeProcess } = require("./sources");
 const { openReviewedFile, liveTty, pasteIntoTerminal, noteInputFocus, selectAllInInput } = require("./review");
 const { panelIsOpen, releaseClosedPanel } = require("./panel-life");
 
@@ -185,13 +185,14 @@ function closeOpenSession() {
 }
 
 function sessionIsLive(session) {
-  if (session.source === "omp") return Boolean(liveTty(session));
+  if (liveTty(session)) return true;
+  if (session.source === "omp") return false;
   if (session.source !== "claude") return true;
   const id = path.basename(session.filePath, ".jsonl");
-  if (!/^[0-9a-f-]{36}$/i.test(id)) return true;
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return false;
   try {
     const commands = execFileSync("ps", ["-ax", "-o", "command="], { encoding: "utf8", maxBuffer: 4_000_000 });
-    return commands.split("\n").some((line) => line.includes(id) && /(^|[/\s])claude(\s|$)/.test(line));
+    return commands.split("\n").some((line) => line.includes(id) && hasClaudeProcess(line));
   } catch {
     return true;
   }
@@ -391,13 +392,14 @@ function postReplyState() {
 }
 
 function replyState(session) {
-  if (!session || session.source !== "omp") {
-    return { canReply: false, hint: "Select an OMP session. Replies are sent to its open window." };
+  if (!session || (session.source !== "omp" && session.source !== "claude")) {
+    return { canReply: false, hint: "Select a session. Replies are sent to its open window." };
   }
+  const label = session.sourceLabel || (session.source === "claude" ? "Claude Code" : "OMP");
   if (!liveTty(session)) {
-    return { canReply: false, hint: "That window is not open. Open it in the terminal before replying." };
+    return { canReply: false, hint: `That ${label} window is not open. Open it in the terminal before replying.` };
   }
-  return { canReply: true, hint: "Reply here to send it to the open OMP window. Press Enter to send." };
+  return { canReply: true, hint: `Reply here to send it to the open ${label} window. Press Enter to send.` };
 }
 
 async function replyToSession(text) {
@@ -409,9 +411,10 @@ async function replyToSession(text) {
     panel.webview.postMessage({ type: "replyResult", ok: false, notice: reply.hint });
     return;
   }
+  const label = session.sourceLabel || (session.source === "claude" ? "Claude Code" : "OMP");
   try {
     await pasteIntoTerminal(liveTty(session), body);
-    panel.webview.postMessage({ type: "replyResult", ok: true, notice: "Sent to the open OMP window." });
+    panel.webview.postMessage({ type: "replyResult", ok: true, notice: `Sent to the open ${label} window.` });
   } catch (error) {
     panel.webview.postMessage({
       type: "replyResult",
@@ -1154,6 +1157,11 @@ function htmlFor(context, webview) {
     ? String(webview.asWebviewUri(vscode.Uri.file(mermaidFile))).replace(/&/g, "&amp;").replace(/"/g, "&quot;")
     : "";
   const mermaid = mermaidSrc ? `<script nonce="${nonce}" src="${mermaidSrc}"></script>` : "";
+  const ompChartsFile = path.join(context.extensionPath, "media", "omp-charts.min.js");
+  const ompChartsSrc = fs.existsSync(ompChartsFile)
+    ? String(webview.asWebviewUri(vscode.Uri.file(ompChartsFile))).replace(/&/g, "&amp;").replace(/"/g, "&quot;")
+    : "";
+  const ompCharts = ompChartsSrc ? `<script nonce="${nonce}" src="${ompChartsSrc}"></script>` : "";
   return `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8" />
@@ -1164,6 +1172,7 @@ function htmlFor(context, webview) {
   <aside class="sidebar">
     <div class="brand">
       <h1>Sessions</h1>
+      <button id="speeds-btn" type="button" title="Compare model token throughput (tok/s) and TTFT across sessions">Speeds</button>
     </div>
     <div class="controls">
       <div class="search-row">
@@ -1208,7 +1217,7 @@ function htmlFor(context, webview) {
     <section id="files" class="files" hidden></section>
     <section id="diffview" class="diffview" hidden></section>
     <form id="reply" class="reply">
-      <textarea id="reply-text" rows="2" placeholder="Reply here to send it to the open OMP window"></textarea>
+      <textarea id="reply-text" rows="2" placeholder="Reply here to send it to the open terminal window"></textarea>
       <div class="reply-row">
         <span id="reply-notice">Select a session from the list.</span>
         <button id="reply-send" type="submit">Send</button>
@@ -1217,6 +1226,7 @@ function htmlFor(context, webview) {
   </main>
   <div id="mascot-dock" class="mascot-dock"></div>
   <div id="mascot-menu" class="mascot-menu" hidden></div>
+  <div id="speeds-modal" class="speeds-modal" hidden></div>
   <div id="diagram" hidden>
     <div class="diagram-bar">
       <span class="diagram-hint">Scroll to zoom · Drag to pan · Double-click to reset</span>
@@ -1230,6 +1240,7 @@ function htmlFor(context, webview) {
     <div id="diagram-stage"></div>
   </div>
   ${mermaid}
+  ${ompCharts}
   <script nonce="${nonce}">${script}</script>
 </html>`;
 }

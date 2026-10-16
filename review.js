@@ -8,7 +8,7 @@ const MarkdownIt = require("markdown-it");
 
 const { normalizeRecord, openRound, noteLiveFile, closeRound, hashText } = require("./comments");
 const { panelIsOpen, releaseClosedPanel } = require("./panel-life");
-const { hasOmpProcess } = require("./sources");
+const { hasOmpProcess, hasClaudeProcess } = require("./sources");
 
 const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
 const MAX_BYTES = 2_000_000;
@@ -275,7 +275,13 @@ class FileView {
 }
 
 function liveTty(session) {
-  if (!session || session.source !== "omp") return "";
+  if (!session) return "";
+  if (session.source === "omp") return liveOmpTty(session);
+  if (session.source === "claude") return liveClaudeTty(session);
+  return "";
+}
+
+function liveOmpTty(session) {
   const dir = path.join(os.homedir(), ".omp", "agent", "terminal-sessions");
   let names = [];
   try {
@@ -300,6 +306,72 @@ function liveTty(session) {
     }
   }
   return "";
+}
+
+function liveClaudeTty(session) {
+  const id = path.basename(String(session.filePath || ""), ".jsonl");
+  let psOut = "";
+  try {
+    psOut = execFileSync("ps", ["-ax", "-o", "pid=,tty=,command="], { encoding: "utf8", maxBuffer: 4_000_000 });
+  } catch {
+    return "";
+  }
+  const candidates = [];
+  for (const raw of psOut.split("\n")) {
+    const match = /^\s*(\d+)\s+(ttys\S+)\s+(.+)$/.exec(raw);
+    if (!match) continue;
+    const [, pid, tty, command] = match;
+    if (!hasClaudeProcess(command)) continue;
+    if (id && command.includes(id)) return `/dev/${tty}`;
+    candidates.push({ pid, tty });
+  }
+  if (!candidates.length || !session.cwd || !isNewestSessionInDir(session.filePath)) return "";
+  const targetCwd = path.resolve(session.cwd);
+  try {
+    const pids = candidates.map((item) => item.pid).join(",");
+    const lsofOut = execFileSync("lsof", ["-a", "-d", "cwd", "-p", pids, "-Fn"], { encoding: "utf8" });
+    let currentPid = "";
+    for (const line of lsofOut.split("\n")) {
+      if (line.startsWith("p")) currentPid = line.slice(1).trim();
+      else if (line.startsWith("n") && currentPid) {
+        if (path.resolve(line.slice(1).trim()) === targetCwd) {
+          const hit = candidates.find((item) => item.pid === currentPid);
+          if (hit) return `/dev/${hit.tty}`;
+        }
+      }
+    }
+  } catch {
+    // Ignore if lsof fails.
+  }
+  return "";
+}
+
+function isNewestSessionInDir(filePath) {
+  if (!filePath) return false;
+  const dir = path.dirname(filePath);
+  let targetMtime = 0;
+  try {
+    targetMtime = fs.statSync(filePath).mtimeMs;
+  } catch {
+    return false;
+  }
+  let names = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    if (!name.endsWith(".jsonl")) continue;
+    const full = path.join(dir, name);
+    if (full === filePath) continue;
+    try {
+      if (fs.statSync(full).mtimeMs > targetMtime) return false;
+    } catch {
+      // Ignore a disappearing file.
+    }
+  }
+  return true;
 }
 
 function pasteIntoTerminal(tty, prompt) {
